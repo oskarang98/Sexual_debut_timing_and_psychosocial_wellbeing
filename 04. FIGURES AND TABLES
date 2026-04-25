@@ -1,0 +1,1441 @@
+################################
+#### 04. FIGURES AND TABLES ####
+################################
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(stringr)
+library(DiagrammeR)
+library(gt)
+library(tidyr)
+library(rlang)
+library(scales)
+library(purrr)
+library(marginaleffects)
+library(psych)
+library(tibble)
+
+#########################################
+#### TABLES AND FIGURES IN MAIN TEXT ####
+#########################################
+
+
+#################################################
+#### TABLE 1: BASELINE DESCRIPTIVE VARIABLES ####
+#################################################
+
+# helpers
+fmt_mean_sd <- function(x) {
+  sprintf("%.2f (%.2f)", mean(x, na.rm = TRUE), sd(x, na.rm = TRUE))
+}
+
+fmt_n_pct <- function(x, value) {
+  n_valid <- sum(!is.na(x))
+  n_value <- sum(as.character(x) == as.character(value), na.rm = TRUE)
+  sprintf("%d (%.1f%%)", n_value, 100 * n_value / n_valid)
+}
+
+sociodemographic_vars <- tibble::tribble(
+  ~var, ~label_table, ~label_cor, ~type, ~min_val, ~max_val,
+  "age_t1", "Age, mean (SD)", "Age (years)", "continuous", NA, NA,
+  "gender_t1", "Gender, n (%)", "Gender", "categorical", NA, NA,
+  "ethnicity_t1", "Migrant background, n (%)", "Ethnicity", "categorical", NA, NA,
+  "urban_t1", "Urbanicity, n (%)", "Urbanicity", "categorical", NA, NA,
+  "religiosity_t1", "Religiosity, n (%)", "Religiosity", "categorical", NA, NA,
+  "disability_t1", "Disability, n (%)", "Disability", "categorical", NA, NA
+) %>%
+  mutate(domain = "Sociodemographic factors", .before = 1)
+
+parental_environment_vars <- tibble::tribble(
+  ~var, ~label_table, ~label_cor, ~type, ~min_val, ~max_val,
+  "parent_ed_t1", "Parental education, n (%)", "Parental education", "categorical", NA, NA,
+  "parent_emp_t1", "Parental employment, n (%)", "Parental employment", "categorical", NA, NA,
+  "living_sit_t1", "Living situation, n (%)", "Living situation", "categorical", NA, NA,
+  "parent_warmth_t1", "Parental warmth, mean (SD)", "Parental warmth", "continuous", 1, 4,
+  "parent_overp_t1", "Parental overprotection, mean (SD)", "Parental overprotection", "continuous", 1, 4,
+  "parent_alc_t1", "Parental alcohol use, mean (SD)", "Parental alcohol use", "continuous", 1, 5,
+  "parent_smok_t3", "Parental smoking, n (%)", "Parental smoking", "categorical", NA, NA
+) %>%
+  mutate(domain = "Parental environment", .before = 1)
+
+baseline_pswb_vars <- tibble::tribble(
+  ~var, ~label_table, ~label_cor, ~type, ~min_val, ~max_val,
+  "dep_cms_t1", "Depressive symptoms, mean (SD)", "Depression (T1)", "continuous", 1, 4,
+  "anx_cms_t1", "Anxiety symptoms, mean (SD)", "Anxiety (T1)", "continuous", 1, 4,
+  "si_bin_t1", "Suicidal ideation, n (%)", "Suicidal ideation (T1)", "categorical", NA, NA,
+  "lon_t1_rev", "Loneliness, mean (SD)", "Loneliness (T1)", "continuous", 1, 4,
+  "sa_cms_t1", "Low social acceptance, mean (SD)", "Low social acceptance (T1)", "continuous", 1, 4,
+  "ss_cms_t1", "Social support, n (%)", "Social support (T1)", "categorical", NA, NA,
+  "se_cms_t1", "Low self-esteem, mean (SD)", "Low self-esteem (T1)", "continuous", 1, 4,
+  "bi_cms_t1", "Body dissatisfaction, mean (SD)", "Body dissatisfaction (T1)", "continuous", 1, 4,
+  "alc_t1", "Problematic alcohol use, mean (SD)", "Problematic alcohol use (T1)", "continuous", 1, 6,
+  "smok_t1", "Smoking, n (%)", "Smoking (T1)", "categorical", NA, NA,
+  "drug_bin_t1", "Illicit drug use, n (%)", "Illicit drug use (T1)", "categorical", NA, NA
+) %>%
+  mutate(domain = "Baseline psychosocial well-being", .before = 1)
+
+table1_var_spec_t1 <- bind_rows(
+  sociodemographic_vars,
+  parental_environment_vars,
+  baseline_pswb_vars
+)
+
+table1_categories_t1 <- tibble::tribble(
+  ~var, ~category, ~value,
+  "gender_t1", "women", "women",
+  "gender_t1", "men", "men",
+  "ethnicity_t1", "at least one Norway-born parent", "0",
+  "ethnicity_t1", "two foreign-born parents", "1",
+  "urban_t1", "rural", "0",
+  "urban_t1", "urban", "1",
+  "religiosity_t1", "non-religious", "0",
+  "religiosity_t1", "religious", "1",
+  "disability_t1", "no chronic disability", "0",
+  "disability_t1", "at least one chronic disability", "1",
+  "parent_ed_t1", "lower education", "0",
+  "parent_ed_t1", "at least one university-educated parent", "1",
+  "parent_emp_t1", "both unemployed", "0",
+  "parent_emp_t1", "at least one employed", "1",
+  "living_sit_t1", "both biological parents", "1",
+  "living_sit_t1", "other living situation", "0",
+  "parent_smok_t3", "no daily smoker", "0",
+  "parent_smok_t3", "at least one daily smoker", "1",
+  "si_bin_t1", "no suicidal ideation", "0",
+  "si_bin_t1", "presence of suicidal ideation", "1",
+  "ss_cms_t1", "high social support", "0",
+  "ss_cms_t1", "low social support", "1",
+  "smok_t1", "non-smoker", "0",
+  "smok_t1", "smoker", "1",
+  "drug_bin_t1", "no illicit drug use", "0",
+  "drug_bin_t1", "illicit drug use", "1"
+)
+
+#### POMP SCALING ####
+# Rescaling of continuous baseline variables (0 to 100) based on theoretical minimum and maximum
+
+pomp_specs_t1 <- tibble(
+  var = c(
+    "parent_warmth_t1", "parent_overp_t1", "parent_alc_t1",
+    "dep_cms_t1", "anx_cms_t1",
+    "lon_t1_rev", "sa_cms_t1",
+    "se_cms_t1", "bi_cms_t1",
+    "alc_t1"
+  ),
+  min = c(1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+  max = c(4, 4, 5, 4, 4, 4, 4, 4, 4, 6)
+)
+
+pomp_transform <- function(x, min_val, max_val) {
+  (as.numeric(x) - min_val) / (max_val - min_val) * 100
+}
+
+analysis_data <- analysis_data %>%
+  mutate(
+    across(
+      all_of(pomp_specs_t1$var),
+      ~ pomp_transform(
+        .x,
+        min_val = pomp_specs_t1 %>% filter(var == cur_column()) %>% pull(min),
+        max_val = pomp_specs_t1 %>% filter(var == cur_column()) %>% pull(max)
+      )
+    )
+  )
+
+# Build table rows
+table1_rows <- table1_var_spec_t1 %>%
+  left_join(table1_categories_t1, by = "var") %>%
+  mutate(
+    category = if_else(type == "continuous", "", category),
+    value = if_else(type == "continuous", NA_character_, value)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    value_out = if (type == "continuous") {
+      fmt_mean_sd(analysis_data[[var]])
+    } else {
+      fmt_n_pct(analysis_data[[var]], value)
+    }
+  ) %>%
+  ungroup() %>%
+  transmute(
+    domain,
+    variable = label_table,
+    category,
+    value = value_out
+  )
+
+# Create table
+table1_gt <- table1_rows %>%
+  gt(groupname_col = "domain") %>%
+  cols_label(
+    variable = "Variable",
+    category = "",
+    value = ""
+  ) %>%
+  cols_align("left", columns = c(variable, category)) %>%
+  cols_align("right", columns = value) %>%
+  tab_options(
+    table.font.names = "Times New Roman",
+    table.font.size = 12,
+    data_row.padding = gt::px(2),
+    table.border.top.color = "black",
+    table.border.bottom.color = "black",
+    column_labels.border.bottom.color = "black"
+  ) %>%
+  tab_style(
+    style = cell_text(style = "italic"),
+    locations = cells_row_groups()
+  ) %>%
+  tab_source_note(
+    source_note = "Note. Continuous variables are POMP-scaled (0–100). Binary and categorical variables are reported as n (%)."
+  )
+
+table1_gt
+
+####################################
+#### TABLE 2: CORRELATION MATRIX #### 
+#####################################
+
+# 1) Variable set and labels in intended order
+cor_spec_t1 <- table1_var_spec_t1
+
+vars_t1 <- cor_spec_t1$var
+
+missing_vars <- setdiff(vars_t1, names(analysis_data))
+if (length(missing_vars) > 0) {
+  stop(
+    paste0(
+      "These variables from table1_var_spec_t1 are missing in analysis_data:\n",
+      paste(missing_vars, collapse = ", ")
+    ),
+    call. = FALSE
+  )
+}
+
+labels_t1 <- cor_spec_t1$label_cor
+names(labels_t1) <- cor_spec_t1$var
+labels_t1 <- labels_t1[vars_t1]
+
+# 2) Prepare numeric data for correlations
+df_cor <- analysis_data %>%
+  select(all_of(vars_t1)) %>%
+  mutate(across(
+    everything(),
+    ~ {
+      x <- .
+      if (is.logical(x)) return(as.numeric(x))
+      if (is.factor(x)) {
+        lev <- levels(x)
+        if (all(!is.na(suppressWarnings(as.numeric(lev))))) {
+          return(as.numeric(as.character(x)))
+        } else {
+          return(as.numeric(x))
+        }
+      }
+      if (is.character(x)) {
+        return(suppressWarnings(as.numeric(x)))
+      }
+      return(suppressWarnings(as.numeric(x)))
+    }
+  ))
+
+all_na_cols <- names(df_cor)[vapply(df_cor, function(z) all(is.na(z)), logical(1))]
+if (length(all_na_cols) > 0) {
+  stop(
+    paste0(
+      "These columns became all NA after numeric conversion:\n",
+      paste(all_na_cols, collapse = ", "),
+      "\nRecode them to numeric (e.g., 0/1 or ordered integers) before correlating."
+    ),
+    call. = FALSE
+  )
+}
+
+# 3) Compute correlations and p-values
+method <- "pearson"
+
+ct <- psych::corr.test(
+  df_cor,
+  use = "pairwise",
+  method = method,
+  adjust = "none"
+)
+
+r_mat <- ct$r
+p_mat <- ct$p
+
+# 4) Format into journal-style character matrix with stars
+fmt_cell <- function(r, p) {
+  if (is.na(r)) return("")
+  
+  stars <- dplyr::case_when(
+    !is.na(p) && p < .05 ~ "*",
+    TRUE ~ ""
+  )
+  
+  paste0(sprintf("%.2f", r), stars)
+}
+
+k <- ncol(r_mat)
+out_chr <- matrix("", nrow = k, ncol = k)
+
+for (i in seq_len(k)) {
+  for (j in seq_len(k)) {
+    if (i == j) {
+      out_chr[i, j] <- "—"
+    } else if (j < i) {
+      out_chr[i, j] <- fmt_cell(r_mat[i, j], p_mat[i, j])
+    } else {
+      out_chr[i, j] <- ""
+    }
+  }
+}
+
+colnames(out_chr) <- as.character(seq_len(k))
+rownames(out_chr) <- vars_t1
+
+table_df <- as.data.frame(out_chr, stringsAsFactors = FALSE) %>%
+  tibble::rownames_to_column("var") %>%
+  mutate(Variable = paste0(seq_len(k), ". ", unname(labels_t1))) %>%
+  select(Variable, everything(), -var)
+
+# 5) Render table
+tab_intercorr_t1 <- gt::gt(table_df) %>%
+  gt::cols_label(Variable = "Variable") %>%
+  gt::cols_align(align = "left", columns = "Variable") %>%
+  gt::cols_align(align = "center", columns = as.character(seq_len(k))) %>%
+  gt::cols_width(
+    Variable ~ gt::px(200)
+  ) %>%
+  gt::tab_options(
+    table.font.names = "Times New Roman",
+    table.font.size  = 14,
+    data_row.padding = gt::px(2),
+
+    table.border.top.style = "solid",
+    table.border.top.width = gt::px(1),
+    table.border.top.color = "#7A7A7A",
+
+    table.border.bottom.style = "solid",
+    table.border.bottom.width = gt::px(1),
+    table.border.bottom.color = "#7A7A7A",
+
+    column_labels.border.top.style = "solid",
+    column_labels.border.top.width = gt::px(0),
+    column_labels.border.top.color = "#7A7A7A",
+
+    column_labels.border.bottom.style = "solid",
+    column_labels.border.bottom.width = gt::px(1),
+    column_labels.border.bottom.color = "#7A7A7A",
+
+    table_body.border.top.style = "solid",
+    table_body.border.top.width = gt::px(0),
+    table_body.border.top.color = "#7A7A7A",
+
+    table_body.border.bottom.style = "solid",
+    table_body.border.bottom.width = gt::px(0),
+    table_body.border.bottom.color = "#7A7A7A",
+
+    table_body.hlines.style = "none",
+    table.background.color = "white"
+  )
+
+tab_intercorr_t1
+
+#####################################
+#### FIGURE 2: FOREST PLOT PANEL ####
+#####################################
+
+contrast_cols <- c(
+  "Early (14 vs 18)"     = "#D55E5E",
+  "Late (22 vs 18)"      = "#009E73",
+  "Very late (25 vs 18)" = "#0072B2"
+)
+
+x_lab <- "Mean/risk difference (0-100)"
+
+forest_dat <- effect_estimates_all %>%
+  filter(estimation == "IPTW-adjusted") %>%
+  transmute(
+    outcome = as.character(outcome),
+    contrast = recode(
+      as.character(contrast),
+      "Early (14y)"     = "Early (14 vs 18)",
+      "Late (22y)"      = "Late (22 vs 18)",
+      "Very late (25y)" = "Very late (25 vs 18)"
+    ),
+    estimate = as.numeric(estimate),
+    conf_low = pmin(as.numeric(`2.5 %`), as.numeric(`97.5 %`)),
+    conf_high = pmax(as.numeric(`2.5 %`), as.numeric(`97.5 %`))
+  ) %>%
+  filter(outcome != "Low sexual desire") %>%
+  mutate(
+    domain = case_when(
+      outcome %in% c("Anxiety symptoms", "Depressive symptoms", "Suicidal ideation") ~ "Mental health outcomes",
+      outcome %in% c("Loneliness", "Low social acceptance", "Low social support") ~ "Social health outcomes",
+      outcome %in% c("Body dissatisfaction", "Low self-esteem") ~ "Self-evaluation outcomes",
+      outcome %in% c("Problematic alcohol use", "Illicit drug use", "Smoking") ~ "Substance use outcomes"
+    ),
+    domain = factor(
+      domain,
+      levels = c(
+        "Mental health outcomes",
+        "Social health outcomes",
+        "Self-evaluation outcomes",
+        "Substance use outcomes"
+      )
+    ),
+    outcome = factor(
+      outcome,
+      levels = c(
+        "Anxiety symptoms",
+        "Depressive symptoms",
+        "Suicidal ideation",
+        "Loneliness",
+        "Low social acceptance",
+        "Low social support",
+        "Body dissatisfaction",
+        "Low self-esteem",
+        "Problematic alcohol use",
+        "Illicit drug use",
+        "Smoking"
+      )
+    ),
+    contrast = factor(
+      contrast,
+      levels = c(
+        "Early (14 vs 18)",
+        "Late (22 vs 18)",
+        "Very late (25 vs 18)"
+      )
+    )
+  ) %>%
+  filter(!is.na(domain)) %>%
+  filter(!(outcome == "Illicit drug use" & contrast == "Very late (25 vs 18)"))
+
+base_forest <- function(dat, show_y = TRUE) {
+  p <- ggplot(
+    dat,
+    aes(
+      x = estimate,
+      y = outcome,
+      xmin = conf_low,
+      xmax = conf_high,
+      colour = contrast
+    )
+  ) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_point() +
+    geom_errorbarh(height = 0) +
+    scale_colour_manual(values = contrast_cols) +
+    labs(x = x_lab, y = NULL) +
+    theme_bw(base_family = "Times") +
+    theme(
+      legend.position = "none",
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      text = element_text(family = "Times", size = 10, colour = "black"),
+      axis.text.x = element_text(family = "Times", size = 10, colour = "black"),
+      axis.text.y = element_text(family = "Times", size = 10, colour = "black"),
+      axis.title.x = element_text(family = "Times", size = 9, colour = "black"),
+      axis.title.y = element_blank(),
+      plot.title = element_text(hjust = 0.5, family = "Times", size = 10, colour = "black")
+    )
+
+  if (!show_y) {
+    p <- p + theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank()
+    )
+  }
+
+  p
+}
+
+make_domain_row <- function(dat, domain_title) {
+  levs <- levels(dat$contrast)
+
+  wrap_plots(
+    map(
+      seq_along(levs),
+      \(i) base_forest(filter(dat, contrast == levs[i]), show_y = i == 1) +
+        labs(title = levs[i])
+    ),
+    ncol = 3
+  ) +
+    plot_annotation(
+      title = domain_title,
+      theme = theme(
+        text = element_text(family = "Times", colour = "black"),
+        plot.title = element_text(
+          hjust = 0.5,
+          face = "bold",
+          family = "Times",
+          size = 12,
+          colour = "black"
+        )
+      )
+    )
+}
+
+full_panel_updated <- forest_dat %>%
+  group_split(domain, .keep = TRUE) %>%
+  map(~ make_domain_row(.x, unique(as.character(.x$domain)))) %>%
+  wrap_plots(ncol = 1)
+
+full_panel_updated
+
+###################################################
+#### FIGURES AND TABLES SUPPLEMENTARY MATERIAL ####
+###################################################
+
+############################################
+#### TABLE S2: WEIGHT DIAGNOSTICS TABLE ####
+############################################
+
+weight_summary_table <- exposure_models %>%
+  transmute(
+    Imputation = .imp,
+
+    # Extract trimmed weights
+    weights = map(weighted_data_trim, ~ .x$weights),
+
+    # Core diagnostics
+    Min = map_dbl(weights, ~ min(.x, na.rm = TRUE)),
+    Max = map_dbl(weights, ~ max(.x, na.rm = TRUE)),
+    Mean = map_dbl(weights, ~ mean(.x, na.rm = TRUE)),
+
+    # Effective sample size
+    ESS = ESS_trim
+  ) %>%
+  select(Imputation, Min, Max, Mean, ESS)
+
+print(weight_summary_table)
+
+#################################
+#### FIGURE S1: FLOW DIAGRAM ####
+#################################
+
+build_flow_diagram <- function(
+  # Sample sizes
+  n_t1 = 4187,
+  n_t2 = 3844,
+  n_t3 = 2923,
+  n_t4 = 2890,
+  n_t5 = 2214,
+
+  # Lost to follow-up from T1 to T2
+  n_ltfu_t1_refused_nocontact = 343,
+
+  # Lost to follow-up after T2
+  n_ltfu_t2_loss_contactinfo = 19,
+  n_ltfu_t2_no_consent_further = 337,
+  n_ltfu_t2_no_contact_t3 = 565,
+  n_ltfu_t2_no_contact_t4 = 617,
+
+  # Lost to follow-up and exclusions between T4 and T5
+  n_ltfu_t4_no_consent_linkage = 284,
+  n_ltfu_t4_died = 14,
+  n_ltfu_t4_withdrew = 6,
+  n_ltfu_t4_no_contact_t5 = 372,
+
+  # Analytical exclusions among T5 respondents
+  n_excl_debut_at_or_before_t1 = 406,
+  n_final = 1808
+) {
+
+  dot <- stringr::str_glue("
+digraph G {{
+  graph [layout = dot, rankdir = TB, nodesep = 0.55, ranksep = 0.75]
+  node  [shape = rectangle, style = \"rounded,filled\", fillcolor = \"white\",
+         fontsize = 12, fontname = \"Times New Roman\"]
+  edge  [color = \"black\", arrowsize = 0.8]
+
+  # Main sample boxes
+  t1 [label = 'T1: 1992\\n n = {n_t1}']
+  t2 [label = 'T2: 1994\\n n = {n_t2}']
+  t3 [label = 'T3: 1999\\n n = {n_t3}']
+  t4 [label = 'T4: 2005\\n n = {n_t4}']
+  t5 [label = 'T5: 2020\\n n = {n_t5}']
+
+  # Lost-to-follow-up boxes
+  l1 [label = 'Lost to follow-up\\n refused/no contact (n = {n_ltfu_t1_refused_nocontact})']
+
+  l2 [label = 'Lost to follow-up\\n\\n loss of contact information (n = {n_ltfu_t2_loss_contactinfo})\\n did not consent to further follow-up (n = {n_ltfu_t2_no_consent_further})\\n no contact at T3 (n = {n_ltfu_t2_no_contact_t3})\\n no contact at T4 (n = {n_ltfu_t2_no_contact_t4})']
+
+  l3 [label = 'Lost to follow-up\\n\\n did not consent to data linkage\\n with administrative registers (n = {n_ltfu_t4_no_consent_linkage})\\n died (n = {n_ltfu_t4_died})\\n withdrew consent (n = {n_ltfu_t4_withdrew})\\n no contact at T5 (n = {n_ltfu_t4_no_contact_t5})']
+
+  # Analytical exclusions box
+  anal [label = 'Excluded (analysis restrictions)\\n\\n {n_excl_debut_at_or_before_t1} individuals excluded due to reporting\\n a debut at or before T1\\n\\n Final analytical dataset: n = {n_final}']
+
+  # Flow edges
+  t1 -> t2
+  t2 -> t3
+  t3 -> t4
+  t4 -> t5
+
+  # Side boxes and connectors
+  t1 -> l1 [dir = both, arrowtail = none]
+  t2 -> l2 [dir = both, arrowtail = none]
+  t4 -> l3 [dir = both, arrowtail = none]
+
+  # Analytical exclusions after T5
+  t5 -> anal [style = dashed]
+
+}}
+")
+
+  DiagrammeR::grViz(dot)
+}
+
+flow_diagram_comp <- build_flow_diagram()
+flow_diagram_comp
+
+##################################################################
+#### FIGURE S2: FREQUENCY DISTRIBUTION FIGURE: FULL T5 SAMPLE ####
+##################################################################
+
+da_freq_table_full_t5 <- dataset_da_rora %>%
+  filter(!is.na(da_reported_or_assigned)) %>%
+  count(da_reported_or_assigned, name = "n") %>%
+  complete(da_reported_or_assigned = 1:48, fill = list(n = 0))
+
+# Define axis breaks
+x_levels_full <- 1:48
+
+sexual_debut_age_freq_plot_full_t5 <- ggplot(
+  da_freq_table_full_t5,
+  aes(x = da_reported_or_assigned, y = n)
+) +
+  geom_col(
+    fill = "#B0C4DE",
+    colour = "black",
+    linewidth = 0.25,
+    width = 0.9
+  ) +
+  geom_vline(
+    xintercept = c(14, 18, 22, 25),
+    linetype = "dotted",
+    linewidth = 0.7,
+    colour = "black"
+  ) +
+  scale_x_continuous(breaks = x_levels_full) +
+  coord_cartesian(xlim = c(0.5, 48.5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    x = "Age at Sexual Debut",
+    y = "Number of Participants"
+  ) +
+  theme_minimal(base_size = 12, base_family = "TimesNewRoman") +
+  theme(
+    text = element_text(family = "TimesNewRoman"),
+    axis.title.x = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+    axis.title.y = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+    axis.text.x = element_text(family = "TimesNewRoman", size = 12, angle = 45, vjust = 1, hjust = 1),
+    axis.text.y = element_text(family = "TimesNewRoman", size = 14),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black")
+  )
+
+sexual_debut_age_freq_plot_full_t5
+
+##################################################
+#### FIGURE S3: FREQUENCY DISTRIBUTION FIGURE ####
+##################################################
+
+da_freq_table <- darora_no_t1 %>%
+  filter(!is.na(da_reported_or_assigned)) %>%
+  count(da_reported_or_assigned, name = "n") %>%
+  complete(da_reported_or_assigned = 12:48, fill = list(n = 0))
+
+# Define axis breaks once
+x_levels <- 12:48
+
+sexual_debut_age_freq_plot <- ggplot(
+  da_freq_table,
+  aes(x = da_reported_or_assigned, y = n)
+) +
+  geom_col(
+    fill = "#B0C4DE",
+    colour = "black",
+    linewidth = 0.25,
+    width = 0.9
+  ) +
+  geom_vline(
+    xintercept = c(14, 18, 22, 25),
+    linetype = "dotted",
+    linewidth = 0.7,
+    colour = "black"
+  ) +
+  scale_x_continuous(breaks = x_levels) +
+  coord_cartesian(xlim = c(11.5, 48.5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    x = "Age at Sexual Debut",
+    y = "Number of Participants"
+  ) +
+  theme_minimal(base_size = 12, base_family = "TimesNewRoman") +
+  theme(
+    text = element_text(family = "TimesNewRoman"),
+    axis.title.x = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+    axis.title.y = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+    axis.text.x = element_text(family = "TimesNewRoman", size = 14, angle = 45, vjust = 1, hjust = 1),
+    axis.text.y = element_text(family = "TimesNewRoman", size = 14),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black")
+  )
+
+sexual_debut_age_freq_plot
+
+##########################################################################
+#### FIGURES S4-S6 FREQUENCY DISTRIBUTION FIGURES: BINARY T5 OUTCOMES ####
+##########################################################################
+
+# Define axis breaks
+x_levels <- 12:48
+
+# Reusable function for frequency distribution plots
+make_binary_freq_plot <- function(data, indicator_var) {
+
+  da_freq_table <- data %>%
+    filter(.data[[indicator_var]] == 1, !is.na(da_reported_or_assigned)) %>%
+    count(da_reported_or_assigned, name = "n") %>%
+    complete(da_reported_or_assigned = 12:48, fill = list(n = 0))
+
+  ggplot(
+    da_freq_table,
+    aes(x = da_reported_or_assigned, y = n)
+  ) +
+    geom_col(
+      fill = "#B0C4DE",
+      colour = "black",
+      linewidth = 0.25,
+      width = 0.9
+    ) +
+    geom_vline(
+      xintercept = c(14, 18, 22, 25),
+      linetype = "dotted",
+      linewidth = 0.7,
+      colour = "black"
+    ) +
+    scale_x_continuous(breaks = x_levels) +
+    coord_cartesian(xlim = c(11.5, 48.5)) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    labs(
+      x = "Age at Sexual Debut",
+      y = "Number of Participants"
+    ) +
+    theme_minimal(base_size = 12, base_family = "TimesNewRoman") +
+    theme(
+      text = element_text(family = "TimesNewRoman"),
+      axis.title.x = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+      axis.title.y = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+      axis.text.x = element_text(family = "TimesNewRoman", size = 14, angle = 45, vjust = 1, hjust = 1),
+      axis.text.y = element_text(family = "TimesNewRoman", size = 14),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),
+      axis.ticks = element_line(colour = "black")
+    )
+}
+
+# Suicidal ideation at T5
+sexual_debut_age_freq_plot_si <- make_binary_freq_plot(
+  data = darora_no_t1,
+  indicator_var = "si_bin_t5"
+)
+
+sexual_debut_age_freq_plot_si
+
+# Illicit drug use at T5
+sexual_debut_age_freq_plot_drug <- make_binary_freq_plot(
+  data = darora_no_t1,
+  indicator_var = "drug_bin_t5"
+)
+
+sexual_debut_age_freq_plot_drug
+
+# Smoking at T5
+sexual_debut_age_freq_plot_smok <- make_binary_freq_plot(
+  data = darora_no_t1,
+  indicator_var = "smok_t5"
+)
+
+sexual_debut_age_freq_plot_smok
+
+##################################################
+#### FIGURE S7 (SENS): FREQUENCY DISTRIBUTION ####
+##################################################
+
+da_freq_table_sens <- darora_no_t1_sens %>%
+  filter(!is.na(da_reported_or_assigned_sens)) %>%
+  count(da_reported_or_assigned_sens, name = "n") %>%
+  complete(da_reported_or_assigned_sens = 12:48, fill = list(n = 0))
+
+# Define axis breaks \
+x_levels <- 12:48
+
+sexual_debut_age_freq_plot_sens <- ggplot(
+  da_freq_table_sens,
+  aes(x = da_reported_or_assigned_sens, y = n)
+) +
+  geom_col(
+    fill = "#B0C4DE",
+    colour = "black",
+    linewidth = 0.25,
+    width = 0.9
+  ) +
+  geom_vline(
+    xintercept = c(14, 18, 22, 25),
+    linetype = "dotted",
+    linewidth = 0.7,
+    colour = "black"
+  ) +
+  scale_x_continuous(breaks = x_levels) +
+  coord_cartesian(xlim = c(11.5, 48.5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    x = "Age at Sexual Debut",
+    y = "Number of Participants"
+  ) +
+  theme_minimal(base_size = 12, base_family = "TimesNewRoman") +
+  theme(
+    text = element_text(family = "TimesNewRoman"),
+    axis.title.x = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+    axis.title.y = element_text(family = "TimesNewRoman", face = "bold", size = 18),
+    axis.text.x = element_text(family = "TimesNewRoman", size = 14, angle = 45, vjust = 1, hjust = 1),
+    axis.text.y = element_text(family = "TimesNewRoman", size = 14),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    axis.ticks = element_line(colour = "black")
+  )
+
+sexual_debut_age_freq_plot_sens
+
+######################################
+#### FIGURE S8: SPLINE PANEL MAIN ####
+######################################
+
+# 1) Rubin-pooled avg_predictions helper
+
+make_spline_curve_rubin <- function(model_list,
+                                    age_grid,
+                                    outcome_name,
+                                    treat_var = "da_reported_or_assigned",
+                                    vcov_type = "HC3",
+                                    conf_level = 0.95) {
+
+  M <- length(model_list)
+  if (M < 1) stop("model_list is empty.", call. = FALSE)
+
+  alpha <- 1 - conf_level
+  zcrit <- stats::qnorm(1 - alpha / 2)
+
+  pred_long <- purrr::map_dfr(
+    seq_along(model_list),
+    function(i) {
+
+      m <- model_list[[i]]
+
+      pred_i <- marginaleffects::avg_predictions(
+        m,
+        variables  = setNames(list(age_grid), treat_var),
+        vcov       = vcov_type,
+        conf_level = conf_level
+      ) %>%
+        dplyr::as_tibble()
+
+      if (!(treat_var %in% names(pred_i))) {
+        stop("avg_predictions() output did not contain treatment variable: ", treat_var, call. = FALSE)
+      }
+      if (!("estimate" %in% names(pred_i))) {
+        stop("avg_predictions() output did not contain 'estimate'.", call. = FALSE)
+      }
+
+      if (!("std.error" %in% names(pred_i))) {
+        if (all(c("conf.low", "conf.high") %in% names(pred_i))) {
+          pred_i <- pred_i %>%
+            mutate(std.error = (.data$conf.high - .data$conf.low) / (2 * zcrit))
+        } else {
+          stop(
+            "avg_predictions() output missing 'std.error' and could not reconstruct it (no conf.low/conf.high).",
+            call. = FALSE
+          )
+        }
+      }
+
+      pred_i %>%
+        select(all_of(treat_var), estimate, std.error) %>%
+        mutate(
+          imp = i,
+          var = (.data$std.error)^2
+        )
+    }
+  )
+
+  pooled <- pred_long %>%
+    group_by(.data[[treat_var]]) %>%
+    summarise(
+      Q_bar  = mean(.data$estimate),
+      U_bar  = mean(.data$var),
+      B      = if (M > 1) stats::var(.data$estimate) else 0,
+      T_var  = .data$U_bar + (1 + 1 / M) * .data$B,
+      SE     = sqrt(.data$T_var),
+      lambda = if_else(.data$T_var > 0 & .data$B > 0, ((1 + 1 / M) * .data$B) / .data$T_var, 0),
+      df     = if_else(.data$T_var > 0 & .data$B > 0, (M - 1) / (.data$lambda^2), Inf),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      t_crit    = stats::qt(1 - alpha / 2, df = .data$df),
+      conf_low  = .data$Q_bar - .data$t_crit * .data$SE,
+      conf_high = .data$Q_bar + .data$t_crit * .data$SE,
+      outcome   = outcome_name
+    ) %>%
+    transmute(
+      !!rlang::sym(treat_var) := .data[[treat_var]],
+      estimate = .data$Q_bar,
+      conf_low,
+      conf_high,
+      outcome
+    )
+
+  pooled
+}
+
+## 2) Model lists per outcome
+
+# Choose which models to plot:
+# - "model_iptw_adj" for IPTW-adjusted
+# - "model_unadj" for unadjusted
+model_col <- "model_iptw_adj"
+
+get_model_list <- function(df_models, outcome_var, model_col) {
+  out <- df_models %>%
+    filter(outcome == outcome_var) %>%
+    arrange(.imp) %>%
+    pull(!!sym(model_col))
+
+  if (length(out) < 1) stop("No models found for outcome: ", outcome_var, call. = FALSE)
+  out
+}
+
+# Outcomes 
+cont_outcomes <- c(
+  dep = "dep_cms_t5",
+  anx = "anx_cms_t5",
+  lon = "lon_cms_t5",
+  sa  = "sa_cms_t5",
+  ss  = "ss_cms_t5",
+  se  = "se_cms_t5",
+  bi  = "bi_cms_t5",
+  alc = "alc_t5"
+)
+
+bin_outcomes <- c(
+  si   = "si_bin_t5",
+  drug = "drug_bin_t5",
+  smok = "smok_t5"
+)
+
+dep_models <- get_model_list(models_cont1, cont_outcomes["dep"], model_col)
+anx_models <- get_model_list(models_cont1, cont_outcomes["anx"], model_col)
+lon_models <- get_model_list(models_cont1, cont_outcomes["lon"], model_col)
+sa_models  <- get_model_list(models_cont1, cont_outcomes["sa"],  model_col)
+ss_models  <- get_model_list(models_cont1, cont_outcomes["ss"],  model_col)
+se_models  <- get_model_list(models_cont1, cont_outcomes["se"],  model_col)
+bi_models  <- get_model_list(models_cont1, cont_outcomes["bi"],  model_col)
+alc_models <- get_model_list(models_cont1, cont_outcomes["alc"], model_col)
+
+si_models   <- get_model_list(models_bin,  bin_outcomes["si"],   model_col)
+drug_models <- get_model_list(models_bin,  bin_outcomes["drug"], model_col)
+smok_models <- get_model_list(models_bin,  bin_outcomes["smok"], model_col)
+
+## 3) Age grids + contrast ages
+
+age_grid <- seq(13, 28, by = 0.25)
+age_grid_drug <- seq(13, 23, by = 0.25)
+contrast_ages <- c(14, 18, 22, 25)
+
+## 4) Compute pooled curves (per outcome) + domain aggregation
+
+# Mental
+anx_curve <- make_spline_curve_rubin(anx_models, age_grid, "Anxiety symptoms")
+dep_curve <- make_spline_curve_rubin(dep_models, age_grid, "Depressive symptoms")
+si_curve  <- make_spline_curve_rubin(si_models,  age_grid, "Suicidal ideation")
+
+mental_curves <- bind_rows(anx_curve, dep_curve, si_curve) %>%
+  mutate(
+    scale_factor = if_else(outcome == "Suicidal ideation", 100, 1),
+    estimate     = estimate  * scale_factor,
+    conf_low     = conf_low  * scale_factor,
+    conf_high    = conf_high * scale_factor
+  )
+
+# Social
+lon_curve <- make_spline_curve_rubin(lon_models, age_grid, "Loneliness")
+sa_curve  <- make_spline_curve_rubin(sa_models,  age_grid, "Low social acceptance")
+ss_curve  <- make_spline_curve_rubin(ss_models,  age_grid, "Low social support")
+
+social_curves <- bind_rows(lon_curve, sa_curve, ss_curve)
+
+# Well-being
+se_curve <- make_spline_curve_rubin(se_models, age_grid, "Low self-esteem")
+bi_curve <- make_spline_curve_rubin(bi_models, age_grid, "Body dissatisfaction")
+
+wb_curves <- bind_rows(se_curve, bi_curve)
+
+# Substance
+alc_curve  <- make_spline_curve_rubin(alc_models,  age_grid,      "Problematic alcohol use")
+drug_curve <- make_spline_curve_rubin(drug_models, age_grid_drug, "Illicit drug use")
+smok_curve <- make_spline_curve_rubin(smok_models, age_grid,      "Smoking")
+
+substance_curves <- bind_rows(alc_curve, drug_curve, smok_curve) %>%
+  mutate(
+    scale_factor = if_else(outcome %in% c("Illicit drug use", "Smoking"), 100, 1),
+    estimate     = estimate  * scale_factor,
+    conf_low     = conf_low  * scale_factor,
+    conf_high    = conf_high * scale_factor
+  )
+
+## 5) Plot helper
+
+plot_domain_spline <- function(curves_df, xlim, fill_col, line_col, xlab = NULL) {
+  ggplot(curves_df, aes(x = da_reported_or_assigned, y = estimate)) +
+    geom_ribbon(aes(ymin = conf_low, ymax = conf_high), fill = fill_col, alpha = 0.6) +
+    geom_line(linewidth = 0.9, color = line_col) +
+    geom_vline(xintercept = contrast_ages, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
+    facet_wrap(~ outcome, nrow = 1, scales = "free_y") +
+    coord_cartesian(xlim = xlim) +
+    scale_x_continuous(breaks = contrast_ages) +
+    labs(x = xlab, y = NULL) +
+    theme_classic() +
+    theme(
+      text             = element_text(family = "Times New Roman", size = 12),
+      strip.text       = element_text(face = "bold"),
+      strip.background = element_blank()
+    )
+}
+
+mental_spline <- plot_domain_spline(
+  curves_df = mental_curves,
+  xlim = c(13, 28),
+  fill_col = "#d2e3f3",
+  line_col = "#004c99",
+  xlab = NULL
+)
+
+social_spline <- plot_domain_spline(
+  curves_df = social_curves,
+  xlim = c(13, 28),
+  fill_col = "#d7f0d8",
+  line_col = "#1b7837",
+  xlab = NULL
+)
+
+wb_se_spline <- plot_domain_spline(
+  curves_df = se_curve,
+  xlim = c(13, 28),
+  fill_col = "#f2d7f5",
+  line_col = "#7b1fa2",
+  xlab = NULL
+)
+
+wb_bi_spline <- plot_domain_spline(
+  curves_df = bi_curve,
+  xlim = c(13, 28),
+  fill_col = "#f2d7f5",
+  line_col = "#7b1fa2",
+  xlab = NULL
+)
+
+wb_spline <- wb_se_spline | wb_bi_spline | patchwork::plot_spacer()
+
+substance_spline <- plot_domain_spline(
+  curves_df = substance_curves,
+  xlim = c(13, 28),
+  fill_col = "#ffe0cc",
+  line_col = "#d95f02",
+  xlab = "Age at sexual debut (years)"
+)
+
+## 6) Combined spline panel
+
+spline_panel_core <- (mental_spline / social_spline / wb_spline / substance_spline)
+
+y_axis_label <- ggplot() +
+  labs(y = "Predicted outcome level (POMP or probability, 0–100)") +
+  theme_void() +
+  theme(
+    axis.title.y = element_text(
+      angle  = 90,
+      family = "Times New Roman",
+      size   = 12
+    )
+  )
+
+spline_panel_main <- y_axis_label | spline_panel_core
+spline_panel_main <- spline_panel_main + patchwork::plot_layout(widths = c(0.02, 0.98))
+
+spline_panel_main
+
+#########################################################
+#### FIGURE S9: SPLINE PANEL: GENDER-SPECIFIC CURVES ####
+#########################################################
+
+## 1) Rubin-pooled avg_predictions helper (gender-specific)
+
+make_spline_curve_rubin_gender <- function(model_list,
+                                           age_grid,
+                                           outcome_name,
+                                           treat_var   = "da_reported_or_assigned",
+                                           gender_var  = "gender_t1",
+                                           vcov_type   = "HC3",
+                                           conf_level  = 0.95) {
+
+  M <- length(model_list)
+  if (M < 1) stop("model_list is empty.", call. = FALSE)
+
+  alpha <- 1 - conf_level
+  zcrit <- stats::qnorm(1 - alpha / 2)
+
+  pred_long <- purrr::map_dfr(
+    seq_along(model_list),
+    function(i) {
+
+      m  <- model_list[[i]]
+      mf <- stats::model.frame(m)
+
+      # Determine gender levels present in the model frame
+      gvals <- mf[[gender_var]]
+      if (is.factor(gvals)) {
+        gvals <- levels(gvals)
+      } else {
+        gvals <- unique(as.character(gvals))
+      }
+
+      # Prefer canonical ordering if available
+      gvals_lower <- tolower(as.character(gvals))
+      if (all(c("women", "men") %in% gvals_lower)) {
+        gvals <- c("women", "men")
+      }
+
+      grid_args <- list()
+      grid_args[[treat_var]]  <- age_grid
+      grid_args[[gender_var]] <- gvals
+
+      newdata_cf <- do.call(
+        marginaleffects::datagridcf,
+        c(list(model = m), grid_args)
+      )
+
+      pred_i <- marginaleffects::avg_predictions(
+        m,
+        newdata    = newdata_cf,
+        by         = c(treat_var, gender_var),
+        vcov       = vcov_type,
+        conf_level = conf_level
+      ) %>%
+        dplyr::as_tibble()
+
+      # Required columns
+      req_base <- c(treat_var, gender_var, "estimate")
+      miss_base <- setdiff(req_base, names(pred_i))
+      if (length(miss_base) > 0) {
+        stop(
+          "avg_predictions() output is missing required columns: ",
+          paste(miss_base, collapse = ", "),
+          call. = FALSE
+        )
+      }
+
+         if (!("std.error" %in% names(pred_i))) {
+        if (all(c("conf.low", "conf.high") %in% names(pred_i))) {
+          pred_i <- pred_i %>%
+            mutate(std.error = (.data$conf.high - .data$conf.low) / (2 * zcrit))
+        } else {
+          stop(
+            "avg_predictions() output is missing 'std.error' and cannot reconstruct it ",
+            "because 'conf.low'/'conf.high' are also missing.",
+            call. = FALSE
+          )
+        }
+      }
+
+      pred_i %>%
+        transmute(
+          imp          = i,
+          !!treat_var  := as.numeric(.data[[treat_var]]),
+          !!gender_var := as.character(.data[[gender_var]]),
+          estimate     = as.numeric(.data$estimate),
+          var          = as.numeric(.data$std.error)^2
+        )
+    }
+  )
+
+  pooled <- pred_long %>%
+    group_by(.data[[treat_var]], .data[[gender_var]]) %>%
+    summarise(
+      Q_bar  = mean(.data$estimate),
+      U_bar  = mean(.data$var),
+      B      = if (M > 1) stats::var(.data$estimate) else 0,
+      T_var  = .data$U_bar + (1 + 1 / M) * .data$B,
+      SE     = sqrt(.data$T_var),
+      lambda = if_else(.data$T_var > 0 & .data$B > 0,
+                       ((1 + 1 / M) * .data$B) / .data$T_var,
+                       0),
+      df     = if_else(.data$T_var > 0 & .data$B > 0,
+                       (M - 1) / (.data$lambda^2),
+                       Inf),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      t_crit    = stats::qt(1 - alpha / 2, df = .data$df),
+      conf_low  = .data$Q_bar - .data$t_crit * .data$SE,
+      conf_high = .data$Q_bar + .data$t_crit * .data$SE,
+      outcome   = outcome_name
+    ) %>%
+    transmute(
+      !!rlang::sym(treat_var)  := .data[[treat_var]],
+      !!rlang::sym(gender_var) := .data[[gender_var]],
+      estimate = .data$Q_bar,
+      conf_low,
+      conf_high,
+      outcome
+    )
+
+  pooled
+}
+
+## 2) Pull model lists per outcome from Script 2 objects
+
+model_col_gender <- "model_iptw_adj_gx"
+
+get_model_list <- function(df_models, outcome_var, model_col) {
+  out <- df_models %>%
+    filter(outcome == outcome_var) %>%
+    arrange(.imp) %>%
+    pull(!!sym(model_col))
+
+  if (length(out) < 1) stop("No models found for outcome: ", outcome_var, call. = FALSE)
+  out
+}
+
+cont_outcomes <- c(
+  dep = "dep_cms_t5",
+  anx = "anx_cms_t5",
+  lon = "lon_cms_t5",
+  sa  = "sa_cms_t5",
+  ss  = "ss_cms_t5",
+  se  = "se_cms_t5",
+  bi  = "bi_cms_t5",
+  alc = "alc_t5"
+)
+
+bin_outcomes <- c(
+  si   = "si_bin_t5",
+  drug = "drug_bin_t5",
+  smok = "smok_t5"
+)
+
+dep_models_g <- get_model_list(models_cont1, cont_outcomes["dep"], model_col_gender)
+anx_models_g <- get_model_list(models_cont1, cont_outcomes["anx"], model_col_gender)
+lon_models_g <- get_model_list(models_cont1, cont_outcomes["lon"], model_col_gender)
+sa_models_g  <- get_model_list(models_cont1, cont_outcomes["sa"],  model_col_gender)
+ss_models_g  <- get_model_list(models_cont1, cont_outcomes["ss"],  model_col_gender)
+se_models_g  <- get_model_list(models_cont1, cont_outcomes["se"],  model_col_gender)
+bi_models_g  <- get_model_list(models_cont1, cont_outcomes["bi"],  model_col_gender)
+alc_models_g <- get_model_list(models_cont1, cont_outcomes["alc"], model_col_gender)
+
+si_models_g   <- get_model_list(models_bin,  bin_outcomes["si"],   model_col_gender)
+drug_models_g <- get_model_list(models_bin,  bin_outcomes["drug"], model_col_gender)
+smok_models_g <- get_model_list(models_bin,  bin_outcomes["smok"], model_col_gender)
+
+## 3) Age grids + reference ages
+
+age_grid <- seq(13, 28, by = 0.25)
+age_grid_drug <- seq(13, 23, by = 0.25)
+contrast_ages <- c(14, 18, 22, 25)
+
+## 4) Helpers: scale binary outcomes to percentage points, prep labels
+
+scale_binary_pp <- function(df) {
+  df %>%
+    mutate(
+      scale_factor = if_else(outcome %in% c("Suicidal ideation", "Illicit drug use", "Smoking"), 100, 1),
+      estimate     = estimate  * scale_factor,
+      conf_low     = conf_low  * scale_factor,
+      conf_high    = conf_high * scale_factor
+    ) %>%
+    select(-scale_factor)
+}
+
+prep_gender_plot_df <- function(df, gender_var = "gender_t1") {
+  df %>%
+    mutate(
+      !!gender_var := tolower(as.character(.data[[gender_var]])),
+      gender_plot  = case_when(
+        .data[[gender_var]] %in% c("women", "woman", "female") ~ "Women",
+        .data[[gender_var]] %in% c("men", "man", "male") ~ "Men",
+        TRUE ~ as.character(.data[[gender_var]])
+      )
+    )
+}
+
+## 5) Plot builder
+
+make_domain_gender_spline <- function(df, ribbon_fill, line_color, x_lab = NULL, xlim = c(13, 28)) {
+
+  ggplot(df, aes(x = da_reported_or_assigned, y = estimate)) +
+    geom_ribbon(
+      aes(ymin = conf_low, ymax = conf_high, group = gender_plot),
+      fill  = ribbon_fill,
+      alpha = 0.35
+    ) +
+    geom_line(
+      aes(linetype = gender_plot, group = gender_plot),
+      linewidth = 0.9,
+      color     = line_color
+    ) +
+    geom_vline(
+      xintercept = contrast_ages,
+      linetype   = "dashed",
+      colour     = "grey50",
+      linewidth  = 0.4
+    ) +
+    facet_wrap(~ outcome, nrow = 1, scales = "free_y") +
+    coord_cartesian(xlim = xlim) +
+    scale_x_continuous(breaks = contrast_ages) +
+    scale_linetype_manual(
+      values = c(Women = "solid", Men = "dashed"),
+      guide  = "none"
+    ) +
+    labs(x = x_lab, y = NULL) +
+    theme_classic() +
+    theme(
+      text             = element_text(family = "Times New Roman", size = 12),
+      strip.text       = element_text(face = "bold"),
+      strip.background = element_blank(),
+      legend.position  = "none",
+      legend.title     = element_blank()
+    )
+}
+
+## 6) Compute Rubin-pooled gender curves and build the stacked panel
+
+# Mental
+anx_curve_g <- make_spline_curve_rubin_gender(anx_models_g, age_grid, "Anxiety symptoms")
+dep_curve_g <- make_spline_curve_rubin_gender(dep_models_g, age_grid, "Depressive symptoms")
+si_curve_g  <- make_spline_curve_rubin_gender(si_models_g,  age_grid, "Suicidal ideation")
+
+mental_curves_g <- bind_rows(anx_curve_g, dep_curve_g, si_curve_g) %>%
+  scale_binary_pp() %>%
+  prep_gender_plot_df()
+
+mental_spline_g <- make_domain_gender_spline(
+  mental_curves_g,
+  ribbon_fill = "#d2e3f3",
+  line_color  = "#004c99",
+  x_lab       = NULL,
+  xlim        = c(13, 28)
+)
+
+# Social
+lon_curve_g <- make_spline_curve_rubin_gender(lon_models_g, age_grid, "Loneliness")
+sa_curve_g  <- make_spline_curve_rubin_gender(sa_models_g,  age_grid, "Low social acceptance")
+ss_curve_g  <- make_spline_curve_rubin_gender(ss_models_g,  age_grid, "Low social support")
+
+social_curves_g <- bind_rows(lon_curve_g, sa_curve_g, ss_curve_g) %>%
+  prep_gender_plot_df()
+
+social_spline_g <- make_domain_gender_spline(
+  social_curves_g,
+  ribbon_fill = "#d7f0d8",
+  line_color  = "#1b7837",
+  x_lab       = NULL,
+  xlim        = c(13, 28)
+)
+
+# Well-being (sexual desire removed, and domain renamed to "self-evaluation")
+se_curve_g <- make_spline_curve_rubin_gender(se_models_g, age_grid, "Low self-esteem")
+bi_curve_g <- make_spline_curve_rubin_gender(bi_models_g, age_grid, "Body dissatisfaction")
+
+wb_se_curve_g <- se_curve_g %>%
+  prep_gender_plot_df()
+
+wb_bi_curve_g <- bi_curve_g %>%
+  prep_gender_plot_df()
+
+wb_se_spline_g <- make_domain_gender_spline(
+  wb_se_curve_g,
+  ribbon_fill = "#f2d7f5",
+  line_color  = "#7b1fa2",
+  x_lab       = NULL,
+  xlim        = c(13, 28)
+)
+
+wb_bi_spline_g <- make_domain_gender_spline(
+  wb_bi_curve_g,
+  ribbon_fill = "#f2d7f5",
+  line_color  = "#7b1fa2",
+  x_lab       = NULL,
+  xlim        = c(13, 28)
+)
+
+wb_spline_g <- wb_se_spline_g | wb_bi_spline_g | patchwork::plot_spacer()
+
+# Substance
+alc_curve_g  <- make_spline_curve_rubin_gender(alc_models_g,  age_grid,     "Problematic alcohol use")
+drug_curve_g <- make_spline_curve_rubin_gender(drug_models_g, age_grid_drug, "Illicit drug use")
+smok_curve_g <- make_spline_curve_rubin_gender(smok_models_g, age_grid,     "Smoking")
+
+substance_curves_g <- bind_rows(alc_curve_g, drug_curve_g, smok_curve_g) %>%
+  scale_binary_pp() %>%
+  prep_gender_plot_df()
+
+substance_spline_g <- make_domain_gender_spline(
+  substance_curves_g,
+  ribbon_fill = "#ffe0cc",
+  line_color  = "#d95f02",
+  x_lab       = "Age at sexual debut (years)",
+  xlim        = c(13, 28)
+)
+
+# Combine into one panel with shared y-axis label + caption
+spline_panel_gender_core <- (mental_spline_g / social_spline_g / wb_spline_g / substance_spline_g)
+
+y_axis_label_gender <- ggplot() +
+  labs(y = "Predicted outcome level (POMP or probability, 0–100)") +
+  theme_void() +
+  theme(
+    axis.title.y = element_text(
+      angle  = 90,
+      family = "Times New Roman",
+      size   = 12
+    )
+  )
+
+spline_panel_gender <- y_axis_label_gender | spline_panel_gender_core
+spline_panel_gender <- spline_panel_gender + patchwork::plot_layout(widths = c(0.02, 0.98))
+
+spline_panel_gender <- spline_panel_gender +
+  plot_annotation(caption = "Dashed line = Men. Solid line = Women.") &
+  theme(
+    plot.caption = element_text(
+      family = "Times New Roman",
+      size   = 11,
+      hjust  = 0.5
+    )
+  )
+
+spline_panel_gender
+
