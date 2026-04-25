@@ -1,0 +1,944 @@
+#############################################################
+### 03. SENSITIVITY ANALYSIS (ALTERNATIVE PRIORITY ORDER) ###
+#############################################################
+
+#### PACKAGES ####
+library(haven)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(psych)
+
+
+#### SAMPLE RESTRICTION ####
+# Keep only participants who responded at T5
+yin_partici5_only_sens <- uin_data_raw %>%
+  filter(partici5 == 1)
+
+#### SENSITIVITY EXPOSURE VARIABLE CREATION ####
+# alternative priority order (T5 preferential)
+
+yin_partici5_only_sens <- yin_partici5_only_sens %>%
+  mutate(
+    sexual_debut_t2_sens = if_else(between(as.numeric(SexEx2_5), 1, 22), as.numeric(SexEx2_5), NA_real_),
+    sexual_debut_t3_sens = if_else(between(as.numeric(SexEx3_5), 1, 27), as.numeric(SexEx3_5), NA_real_),
+    sexual_debut_t4_sens = if_else(between(as.numeric(SexEx4_5), 1, 33), as.numeric(SexEx4_5), NA_real_),
+    sexual_debut_t5_sens = if_else(between(as.numeric(SexEx5_5), 1, 48), as.numeric(SexEx5_5), NA_real_),
+    sexual_debut_age_sens = coalesce(sexual_debut_t5_sens, sexual_debut_t4_sens, sexual_debut_t3_sens, sexual_debut_t2_sens)
+  )
+
+##### QC: Response distribution on SexEx5_4 among individuals with missing debut age #####
+sexex5_4_summary_missing_debut_sens <- yin_partici5_only_sens %>%
+  filter(is.na(sexual_debut_age_sens)) %>%
+  summarise(
+    answered_1 = sum(SexEx5_4 == 1, na.rm = TRUE),
+    answered_2 = sum(SexEx5_4 == 2, na.rm = TRUE),
+    missing_SexEx5_4 = sum(is.na(SexEx5_4)),
+    .groups = "drop"
+  )
+
+sexex5_4_summary_missing_debut_sens
+
+##### Assigning debut age for individuals without reported debut who confirmed no debut at T5 #####
+# Birth year is retrieved in the fixed priority order and converted to age in 2020
+
+yin_partici5_only_sens <- yin_partici5_only_sens %>%
+  mutate(
+    birth_year_t5_sens = as.numeric(Birth5_3),
+    birth_year_t4_sens = as.numeric(Birth4_3),
+    birth_year_t3_sens = as.numeric(Birth3_3),
+    assigned_debut_age_sens = case_when(
+      !is.na(birth_year_t5_sens) ~ 2020 - birth_year_t5_sens, #birth year reported as four digits (YYYY)
+      is.na(birth_year_t5_sens) & !is.na(birth_year_t4_sens) ~ 120 - birth_year_t4_sens, #birth year reported as two digits (YY)
+      is.na(birth_year_t5_sens) & is.na(birth_year_t4_sens) & !is.na(birth_year_t3_sens) ~ 120 - birth_year_t3_sens, #birth year reported as two digits (YY)
+      TRUE ~ NA_real_
+    )
+  )
+
+##### Table of individuals with missing debut age and no debut confirmed at T5 #####
+assigned_debut_table_sens <- yin_partici5_only_sens %>%
+  filter(is.na(sexual_debut_age_sens), SexEx5_4 == 2) %>%
+  select(
+    id,
+    sexual_debut_age_sens,
+    SexEx5_4,
+    Birth5_3,
+    Birth4_3,
+    Birth3_3,
+    assigned_debut_age_sens
+  )
+
+assigned_debut_table_sens
+
+##### Unified debut age variable reported or assigned #####
+dataset_da_rora_sens <- yin_partici5_only_sens %>%
+  mutate(
+    da_reported_or_assigned_sens = case_when(
+      is.na(sexual_debut_age_sens) & SexEx5_4 == 2 ~ assigned_debut_age_sens,
+      TRUE ~ sexual_debut_age_sens
+    )
+  )
+
+##### Remaining missing values in the unified exposure #####
+n_missing_da_reported_or_assigned_sens <- dataset_da_rora_sens %>%
+  summarise(n_missing = sum(is.na(da_reported_or_assigned_sens)), .groups = "drop") %>%
+  pull(n_missing)
+
+n_missing_da_reported_or_assigned_sens
+
+#### Exclude T1 debuters ####
+# T1 debuters and debut ages below 12 are excluded to ensure temporal ordering
+
+n_initial_sens <- dataset_da_rora_sens %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+t1_excluded_sens <- dataset_da_rora_sens %>%
+  filter(SexEx1_4 == 1)
+
+n_t1_excluded_sens <- t1_excluded_sens %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+after_t1_sens <- dataset_da_rora_sens %>%
+  filter(SexEx1_4 != 1 | is.na(SexEx1_4))
+
+early_debut_excluded_sens <- after_t1_sens %>%
+  filter(!is.na(da_reported_or_assigned_sens), da_reported_or_assigned_sens < 12)
+
+n_early_excluded_sens <- early_debut_excluded_sens %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+darora_no_t1_sens <- after_t1_sens %>%
+  filter(da_reported_or_assigned_sens >= 12 | is.na(da_reported_or_assigned_sens))
+
+n_final_sens <- darora_no_t1_sens %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+exclusion_counts_sens <- tibble(
+  n_initial_sens = n_initial_sens,
+  n_t1_excluded_sens = n_t1_excluded_sens,
+  n_early_excluded_sens = n_early_excluded_sens,
+  n_final_sens = n_final_sens,
+  n_excluded_total_sens = n_initial_sens - n_final_sens
+)
+
+exclusion_counts_sens
+
+#### BASELINE COVARIATES #### 
+##### Sociodemographic covariates #####
+
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    age_birth = 92 - Birth9_3,
+    age_t1 = if_else(is.na(Age1_1), Age2_1 - 2, Age1_1),
+    age_t1 = if_else(is.na(age_t1), age_birth, age_t1),
+    age_t1 = if_else(age_t1 > 25, Age2_1 - 2, age_t1),
+    gender_tmp = if_else(is.na(Gende1_1), gende, Gende1_1),
+    gender_t1 = factor(
+      case_when(
+        gender_tmp == 1 ~ "women",
+        gender_tmp == 0 ~ "men",
+        TRUE ~ NA_character_
+      ),
+      levels = c("women", "men")
+    ),
+    ethnicity_t1 = case_when(
+      Origi1p1 == 1 | Origi1p2 == 1 ~ 0,
+      Origi1p1 == 2 & Origi1p2 == 2 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    urban_t1 = case_when(
+      Urban1_1 %in% c(1, 2) ~ 0,
+      Urban1_1 %in% c(3, 4) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    religiosity_t1 = case_when(
+      Relig1_1 %in% c(1, 2, 5) ~ 1,
+      Relig1_1 %in% c(3, 4) ~ 0,
+      TRUE ~ NA_real_
+    ),
+    disability_t1 = case_when(
+      Disa1_02 == 1 | Disa1_01 == 1 | Disa1_05 == 1 ~ 1,
+      is.na(Disa1_02) & is.na(Disa1_01) & is.na(Disa1_05) ~ NA_real_,
+      TRUE ~ 0
+    )
+  ) %>%
+  select(-gender_tmp)
+
+##### Family environment covariates #####
+
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    education_reg = case_when(
+      SOSBAK %in% c(4, 3) ~ "college/university",
+      SOSBAK %in% c(2, 1) ~ "lower",
+      SOSBAK == 9 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    education_sr = case_when(
+      ParEd1_7 %in% c(1, 2, 3) | ParEd1_6 %in% c(1, 2, 3) ~ "college/university",
+      ParEd1_3 %in% c(1, 2, 3) | ParEd1_4 %in% c(1, 2, 3) |
+        ParEd1_5 %in% c(1, 2, 3) | ParEd1_1 %in% c(1, 2, 3) |
+        ParEd1_2 %in% c(1, 2, 3) ~ "lower",
+      TRUE ~ NA_character_
+    ),
+    parent_ed_t1 = if_else(is.na(education_reg), education_sr, education_reg),
+    parent_ed_t1 = case_when(
+      parent_ed_t1 == "college/university" ~ 1,
+      parent_ed_t1 == "lower" ~ 0,
+      TRUE ~ NA_real_
+    ),
+    parent_emp_t1 = case_when(
+      (ParJo1_1 %in% c(3, 4, 5)) & (ParJo1_2 %in% c(3, 4, 5)) ~ 0,
+      is.na(ParJo1_1) & is.na(ParJo1_2) ~ NA_real_,
+      TRUE ~ 1
+    ),
+    living_sit_t1 = case_when(
+      House1_1 == 1 ~ 1,
+      is.na(House1_1) ~ NA_real_,
+      TRUE ~ 0
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    parent_warmth_t1 = mean(c_across(PBI1_06:PBI1_10), na.rm = TRUE),
+    parent_overp_t1 = mean(c_across(PBI1_01:PBI1_05), na.rm = TRUE),
+    parent_alc_t1 = mean(c_across(c(Subst1p1, Subst1p2)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parent_smok_t3 = case_when(
+      Smok3_02 == 4 | Smok3_03 == 4 ~ 1,
+      is.na(Smok3_02) & is.na(Smok3_03) ~ NA_real_,
+      TRUE ~ 0
+    )
+  ) %>%
+  select(-education_reg, -education_sr)
+
+##### Baseline psychosocial measures #####
+
+#Loneliness item reversal and composite
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    UCLA1_1_r = if_else(!is.na(UCLA1_1), 5 - UCLA1_1, NA_real_),
+    UCLA1_2_r = if_else(!is.na(UCLA1_2), 5 - UCLA1_2, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    lon_t1_rev = mean(c_across(c(UCLA1_1_r, UCLA1_2_r, UCLA1_3, UCLA1_4)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(lon_t1_rev = na_if(lon_t1_rev, NaN))
+
+# Baseline composites and binaries
+# Helper: mean score from item set with NaN set to missing
+score_mean_from_items_sens <- function(df, items) {
+  df %>%
+    select(all_of(items)) %>%
+    rowwise() %>%
+    mutate(score = mean(c_across(everything()), na.rm = TRUE)) %>%
+    ungroup() %>%
+    transmute(score = na_if(score, NaN)) %>%
+    pull(score)
+}
+
+# Depression and anxiety at T1 
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    dep_cms_t1 = score_mean_from_items_sens(darora_no_t1_sens, str_c("SCL1_", str_pad(7:12, width = 2, pad = "0"))),
+    anx_cms_t1 = score_mean_from_items_sens(darora_no_t1_sens, str_c("SCL1_", str_pad(1:6, width = 2, pad = "0"))),
+    si_bin_t1 = case_when(
+      SCL1_13 == 1 ~ 0,
+      SCL1_13 %in% c(2, 3, 4) ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Low social acceptance (T1): reverse items 2, 4, 5 before CMS
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    SPPA1sa2_r = if_else(!is.na(SPPA1sa2), 5 - SPPA1sa2, NA_real_),
+    SPPA1sa4_r = if_else(!is.na(SPPA1sa4), 5 - SPPA1sa4, NA_real_),
+    SPPA1sa5_r = if_else(!is.na(SPPA1sa5), 5 - SPPA1sa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    sa_cms_t1 = mean(c_across(c(SPPA1sa1, SPPA1sa2_r, SPPA1sa3, SPPA1sa4_r, SPPA1sa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(sa_cms_t1 = na_if(sa_cms_t1, NaN))
+
+# Low self-esteem (T1): reverse items 3, 4, 5 before CMS
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    SPPA1sw3_r = if_else(!is.na(SPPA1sw3), 5 - SPPA1sw3, NA_real_),
+    SPPA1sw4_r = if_else(!is.na(SPPA1sw4), 5 - SPPA1sw4, NA_real_),
+    SPPA1sw5_r = if_else(!is.na(SPPA1sw5), 5 - SPPA1sw5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    se_cms_t1 = mean(c_across(c(SPPA1sw1, SPPA1sw2, SPPA1sw3_r, SPPA1sw4_r, SPPA1sw5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(se_cms_t1 = na_if(se_cms_t1, NaN))
+
+# Body dissatisfaction (T1): reverse items 4, 5 before CMS
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    SPPA1pa4_r = if_else(!is.na(SPPA1pa4), 5 - SPPA1pa4, NA_real_),
+    SPPA1pa5_r = if_else(!is.na(SPPA1pa5), 5 - SPPA1pa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    bi_cms_t1 = mean(c_across(c(SPPA1pa1, SPPA1pa2, SPPA1pa3, SPPA1pa4_r, SPPA1pa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(bi_cms_t1 = na_if(bi_cms_t1, NaN))
+
+# Low social support (T1): binary high/low support based on three "would not go to anyone" items
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    ss_sum_t1 = case_when(
+      is.na(SS1b01) & is.na(SS1c01) & is.na(SS1d01) ~ NA_real_,
+      TRUE ~ as.numeric(SS1b01) + as.numeric(SS1c01) + as.numeric(SS1d01)
+    ),
+    ss_cms_t1 = case_when(
+      ss_sum_t1 %in% c(0, 1) ~ 0,
+      ss_sum_t1 %in% c(2, 3) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    alc_t1 = Subst1_1,
+    drug_bin_t1 = case_when(
+      Subst1_2 %in% c(2, 3, 4, 5, 6) | Subst1_4 %in% c(2, 3, 4, 5, 6) ~ 1,
+      Subst1_2 == 1 & Subst1_4 == 1 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    smok_t1 = case_when(
+      Smoke1_1 %in% c(4, 5) ~ 1,
+      Smoke1_1 %in% c(1, 2, 3) ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(-ss_sum_t1)
+
+
+#### DEPENDENT VARIABLES ####
+##### Item sets for T5 scoring #####
+
+items_dep_t5_sens <- str_c("SCL5_", str_pad(7:12, width = 2, pad = "0"))
+items_anx_t5_sens <- str_c("SCL5_", str_pad(1:6, width = 2, pad = "0"))
+item_si_t5_sens <- "SCL5_13"
+
+items_ss_t5_raw_sens <- c("SSsat5_1", "SSsat5_3", "SSsat5_5")
+items_sd_t5_sens <- str_c("SexFa5_", 1:3)
+
+items_drug_t5_sens <- c("Subst5_2", "Subst5_6", "Subst5_7", "Subst5_4")
+item_alc_t5_sens <- "Subst5_1"
+item_smok_t5_sens <- "Smoke5_1"
+
+# Loneliness reversal and composite
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    UCLA5_1_r = 5 - UCLA5_1,
+    UCLA5_2_r = 5 - UCLA5_2
+  ) %>%
+  rowwise() %>%
+  mutate(
+    lon_cms_t5 = mean(c_across(c(UCLA5_1_r, UCLA5_2_r, UCLA5_3, UCLA5_4)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(lon_cms_t5 = na_if(lon_cms_t5, NaN))
+
+##### Continuous composites and binary outcomes #####
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    dep_cms_t5 = score_mean_from_items_sens(darora_no_t1_sens, items_dep_t5_sens),
+    anx_cms_t5 = score_mean_from_items_sens(darora_no_t1_sens, items_anx_t5_sens),
+    si_bin_t5 = case_when(
+      .data[[item_si_t5_sens]] == 1 ~ 0,
+      .data[[item_si_t5_sens]] %in% c(2, 3, 4) ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Low social acceptance (T5): reverse items 2, 4, 5 before CMS
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    SPPA5sa2_r = if_else(!is.na(SPPA5sa2), 5 - SPPA5sa2, NA_real_),
+    SPPA5sa4_r = if_else(!is.na(SPPA5sa4), 5 - SPPA5sa4, NA_real_),
+    SPPA5sa5_r = if_else(!is.na(SPPA5sa5), 5 - SPPA5sa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    sa_cms_t5 = mean(c_across(c(SPPA5sa1, SPPA5sa2_r, SPPA5sa3, SPPA5sa4_r, SPPA5sa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(sa_cms_t5 = na_if(sa_cms_t5, NaN))
+
+# Low social support (T5): reverse composite so higher = worse (lower support)
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    ss_cms_t5 = score_mean_from_items_sens(darora_no_t1_sens, items_ss_t5_raw_sens)
+  ) %>%
+  mutate(
+    ss_cms_t5 = if_else(is.na(ss_cms_t5), NA_real_, 5 - ss_cms_t5)
+  )
+
+# Low self-esteem (T5): reverse items 3, 4, 5 before CMS
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    SPPA5sw3_r = if_else(!is.na(SPPA5sw3), 5 - SPPA5sw3, NA_real_),
+    SPPA5sw4_r = if_else(!is.na(SPPA5sw4), 5 - SPPA5sw4, NA_real_),
+    SPPA5sw5_r = if_else(!is.na(SPPA5sw5), 5 - SPPA5sw5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    se_cms_t5 = mean(c_across(c(SPPA5sw1, SPPA5sw2, SPPA5sw3_r, SPPA5sw4_r, SPPA5sw5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(se_cms_t5 = na_if(se_cms_t5, NaN))
+
+# Body dissatisfaction (T5): reverse items 4, 5 before CMS
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    SPPA5pa4_r = if_else(!is.na(SPPA5pa4), 5 - SPPA5pa4, NA_real_),
+    SPPA5pa5_r = if_else(!is.na(SPPA5pa5), 5 - SPPA5pa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    bi_cms_t5 = mean(c_across(c(SPPA5pa1, SPPA5pa2, SPPA5pa3, SPPA5pa4_r, SPPA5pa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(bi_cms_t5 = na_if(bi_cms_t5, NaN))
+
+# Low sexual desire (T5)
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    sd_cms_t5 = score_mean_from_items_sens(darora_no_t1_sens, items_sd_t5_sens),
+    alc_t5 = .data[[item_alc_t5_sens]]
+  )
+
+# Illicit drug use and smoking (T5)
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  rowwise() %>%
+  mutate(
+    drug_non1_count = sum(c_across(all_of(items_drug_t5_sens)) %in% c(2, 3, 4, 5, 6), na.rm = TRUE),
+    drug_all1 = sum(c_across(all_of(items_drug_t5_sens)) == 1, na.rm = TRUE) == length(items_drug_t5_sens),
+    drug_all_na = sum(is.na(c_across(all_of(items_drug_t5_sens))), na.rm = TRUE) == length(items_drug_t5_sens),
+    drug_bin_t5 = case_when(
+      drug_non1_count >= 1 ~ 1,
+      drug_all1 ~ 0,
+      drug_all_na ~ NA_real_,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    smok_t5 = case_when(
+      .data[[item_smok_t5_sens]] %in% c(4, 5) ~ 1,
+      .data[[item_smok_t5_sens]] %in% c(1, 2, 3) ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(-drug_non1_count, -drug_all1, -drug_all_na)
+
+#### SCALE RELIABILITY ####
+# McDonald's omega computed on complete cases
+
+omega_psych_complete_sens <- function(df, items, scale_name) {
+
+  safe_omega <- purrr::possibly(
+    function(dat_complete) psych::omega(dat_complete, nfactors = 1, plot = FALSE)$omega.tot,
+    otherwise = NA_real_
+  )
+
+  dat <- df %>%
+    dplyr::select(dplyr::all_of(items)) %>%
+    tidyr::drop_na()
+
+  k <- ncol(dat)
+  N_used <- nrow(dat)
+
+  tibble::tibble(
+    scale = scale_name,
+    n_items = k,
+    N_used = N_used,
+    omega_mc = safe_omega(dat)
+  )
+}
+
+ucla_items_scored_t5_sens <- c("UCLA5_1_r", "UCLA5_2_r", "UCLA5_3", "UCLA5_4")
+items_sa_t5_scored_sens <- c("SPPA5sa1", "SPPA5sa2_r", "SPPA5sa3", "SPPA5sa4_r", "SPPA5sa5_r")
+items_se_t5_scored_sens <- c("SPPA5sw1", "SPPA5sw2", "SPPA5sw3_r", "SPPA5sw4_r", "SPPA5sw5_r")
+items_bi_t5_scored_sens <- c("SPPA5pa1", "SPPA5pa2", "SPPA5pa3", "SPPA5pa4_r", "SPPA5pa5_r")
+
+omega_results_t5_sens <- dplyr::bind_rows(
+  omega_psych_complete_sens(darora_no_t1_sens, items_dep_t5_sens, "Depressive symptoms (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, items_anx_t5_sens, "Anxiety symptoms (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, ucla_items_scored_t5_sens, "Loneliness (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, items_sa_t5_scored_sens, "Low social acceptance (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, items_ss_t5_raw_sens, "Low social support (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, items_se_t5_scored_sens, "Low self-esteem (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, items_bi_t5_scored_sens, "Body dissatisfaction (T5)"),
+  omega_psych_complete_sens(darora_no_t1_sens, items_sd_t5_sens, "Low sexual desire (T5)")
+)
+
+omega_results_t5_sens
+
+#### POMP SCALING ####
+# Rescaling of continuous outcomes (0 to 100) based on theoretical minimum and maximum
+
+pomp_specs_sens <- tibble(
+  var = c(
+    "dep_cms_t5", "anx_cms_t5",
+    "lon_cms_t5", "sa_cms_t5", "ss_cms_t5",
+    "se_cms_t5", "bi_cms_t5",
+    "sd_cms_t5",
+    "alc_t5"
+  ),
+  min = c(1, 1, 1, 1, 1, 1, 1, 1, 1),
+  max = c(4, 4, 4, 4, 4, 4, 4, 6, 6)
+)
+
+# Apply a linear transformation that maps the theoretical minimum to 0 and maximum to 100
+pomp_transform_sens <- function(x, min_val, max_val) {
+  (x - min_val) / (max_val - min_val) * 100
+}
+
+darora_no_t1_sens <- darora_no_t1_sens %>%
+  mutate(
+    across(
+      all_of(pomp_specs_sens$var),
+      ~ pomp_transform_sens(
+        .x,
+        min_val = pomp_specs_sens %>% filter(var == cur_column()) %>% pull(min),
+        max_val = pomp_specs_sens %>% filter(var == cur_column()) %>% pull(max)
+      )
+    )
+  )
+
+#### SELECT ANALYTICAL DATASET ####
+analysis_data_sens <- darora_no_t1_sens %>%
+  select(
+    id,
+    da_reported_or_assigned_sens,
+    gender_t1, age_t1, ethnicity_t1, urban_t1, religiosity_t1, disability_t1,
+    parent_ed_t1, parent_emp_t1, living_sit_t1,
+    parent_warmth_t1, parent_overp_t1, parent_alc_t1, parent_smok_t3,
+    dep_cms_t1, anx_cms_t1, si_bin_t1,
+    lon_t1_rev, sa_cms_t1, ss_cms_t1,
+    se_cms_t1, bi_cms_t1, alc_t1, smok_t1, drug_bin_t1,
+    dep_cms_t5, anx_cms_t5, si_bin_t5,
+    lon_cms_t5, sa_cms_t5, ss_cms_t5,
+    se_cms_t5, bi_cms_t5, sd_cms_t5,
+    alc_t5, drug_bin_t5, smok_t5
+  ) %>%
+  arrange(id)
+
+#### DESCRIPTIVE CHECK: EXPOSURE VARIABLE ####
+exposure_desc_sens <- analysis_data_sens %>%
+  dplyr::filter(!is.na(da_reported_or_assigned_sens)) %>%
+  dplyr::summarise(
+    n        = dplyr::n(),
+    mean     = mean(da_reported_or_assigned_sens),
+    median   = stats::median(da_reported_or_assigned_sens),
+    mode     = as.numeric(
+      names(sort(table(da_reported_or_assigned_sens), decreasing = TRUE))[1]
+    ),
+    min      = min(da_reported_or_assigned_sens),
+    max      = max(da_reported_or_assigned_sens),
+    range    = max - min
+  )
+
+exposure_desc_sens
+
+
+##############################################################
+#### WITHIN-PERSON CONSISTENCY OF DEBUT AGE ASSIGNMENT #######
+##############################################################
+
+debut_consistency_analytical <- dataset_da_rora %>%
+  filter(SexEx1_4 != 1 | is.na(SexEx1_4)) %>%
+  filter(da_reported_or_assigned >= 12 | is.na(da_reported_or_assigned)) %>%
+  filter(!is.na(da_reported_or_assigned), !is.na(da_reported_or_assigned_sens)) %>%
+  mutate(
+    diff_years = da_reported_or_assigned_sens - da_reported_or_assigned,
+    abs_diff_years = abs(diff_years),
+    consistent = da_reported_or_assigned == da_reported_or_assigned_sens
+  )
+
+debut_consistency_summary <- debut_consistency_analytical %>%
+  summarise(
+    n_compared = n(),
+    n_consistent = sum(consistent),
+    pct_consistent = mean(consistent) * 100,
+    n_inconsistent = sum(!consistent),
+    pct_inconsistent = mean(!consistent) * 100,
+    mean_diff_years = mean(diff_years),
+    sd_diff_years = sd(diff_years),
+    mean_abs_diff_years = mean(abs_diff_years),
+    sd_abs_diff_years = sd(abs_diff_years),
+    .groups = "drop"
+  )
+
+debut_consistency_summary
+
+##################################################################
+#### RUN MAIN ANALYSIS WITH ALTERNATIVE EXPOSURE CONSTRUCTION ####
+##################################################################
+
+#### PACKAGES ####
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(mice)
+library(WeightIt)
+library(marginaleffects)
+library(cobalt)	   
+
+##############################
+#### MULTIPLE IMPUTATION #####
+##############################
+
+analysis_data_sens <- analysis_data_sens %>%
+  mutate(across(where(~ inherits(., "haven_labelled")), haven::zap_labels))
+
+init_imp_sens <- mice(analysis_data_sens, maxit = 0)
+
+predictor_matrix_sens <- init_imp_sens$predictorMatrix
+predictor_matrix_sens["id", ] <- 0
+predictor_matrix_sens[, "id"] <- 0
+
+imp_method_sens <- init_imp_sens$method
+
+set.seed(12345)
+
+Imp1_sens <- mice(
+  analysis_data_sens,
+  m = 10,
+  maxit = 5,
+  method = imp_method_sens,
+  predictorMatrix = predictor_matrix_sens
+)
+
+plot(Imp1_sens)
+
+sexual_debut_data_imp_sens <- complete(Imp1_sens, action = "long", include = FALSE)
+
+covariates_sens <- "gender_t1 + age_t1 + ethnicity_t1 +
+               urban_t1 + religiosity_t1 + disability_t1 +
+               parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+               parent_warmth_t1 + parent_overp_t1 +
+               parent_alc_t1 + parent_smok_t3 +
+               dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+               lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+               se_cms_t1 + bi_cms_t1 +
+               alc_t1 + smok_t1 + drug_bin_t1"
+
+###################################################
+#### EXPOSURE MODELS (for age at sexual debut) ####
+###################################################
+
+exposure_models_sens <- sexual_debut_data_imp_sens %>%
+  group_by(.imp) %>%
+  nest() %>%
+  mutate(
+    weighted_data = map(.x = data,
+                        ~ weightit(as.formula(paste0("da_reported_or_assigned_sens ~ ", covariates_sens)),
+                                   data = .x,
+                                   method = "cbps",
+                                   stabilize = TRUE)),
+    balance_after = map(.x = weighted_data,
+                        ~ bal.tab(.x, thresholds = 0.10, poly = 2)),
+    non_balanced = map_dbl(.x = balance_after,
+                           ~ .x$Balanced.correlations["Not balanced, >0.1", "count"]),
+    ESS = map_dbl(.x = balance_after,
+                  ~ .x$Observations["Adjusted", ]),
+    weighted_data_trim = map(.x = weighted_data,
+                             ~ { w <- trim(.x, at = .99); trim(w, at = .01) }),
+    balance_after_trim = map(.x = weighted_data_trim,
+                             ~ bal.tab(.x, thresholds = 0.10, poly = 2)),
+    non_balanced_trim = map_dbl(.x = balance_after_trim,
+                                ~ .x$Balanced.correlations["Not balanced, >0.1", "count"]),
+    ESS_trim = map_dbl(.x = balance_after_trim,
+                       ~ .x$Observations["Adjusted", ])
+  )
+
+max(exposure_models_sens$non_balanced_trim)
+mean(exposure_models_sens$ESS_trim)
+summary(exposure_models_sens$weighted_data_trim[[3]]$weights) 
+
+covariate_balance_sens <- exposure_models_sens %>%
+  mutate(
+    tab_bal = map(.x = weighted_data_trim,
+                  ~ bal.tab(.x, thresholds = 0.10, poly = 2)),
+    love_plot = map(.x = weighted_data_trim,
+                    ~ love.plot(.x,
+                                stats = "c",
+                                abs = TRUE,
+                                poly = 2))
+  )
+
+love_plot_sens <- covariate_balance_sens$love_plot[[1]]
+love_plot_sens
+
+#################################################################
+#### OUTCOME MODELS (for psychosocial well-being in midlife) ####
+#################################################################
+
+models_cont1_sens <- sexual_debut_data_imp_sens %>%
+  pivot_longer(
+    cols = c(
+      dep_cms_t5, anx_cms_t5,
+      lon_cms_t5, sa_cms_t5, ss_cms_t5,
+      se_cms_t5, bi_cms_t5, sd_cms_t5,
+      alc_t5
+    ),
+    names_to = "outcome",
+    values_to = "value"
+  ) %>%
+  group_by(outcome, .imp) %>%
+  nest() %>%
+  left_join(., select(exposure_models_sens, weighted_data_trim), by = ".imp") %>%
+  mutate(
+    model_unadj = map(
+      .x = data,
+      ~ glm(
+        value ~ splines::ns(
+          da_reported_or_assigned_sens,
+          knots = quantile(da_reported_or_assigned_sens, probs = 0.50, na.rm = TRUE),
+          Boundary.knots = quantile(da_reported_or_assigned_sens, probs = c(0.05, 0.95), na.rm = TRUE)
+        ),
+        family = gaussian,
+        data = .x
+      )
+    ),
+    effect_late_unadj = map2(
+      .x = model_unadj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        variables = list(da_reported_or_assigned_sens = c(18, 22)),
+        vcov = "HC3"
+      )
+    ),
+    effect_very_late_unadj = map2(
+      .x = model_unadj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        variables = list(da_reported_or_assigned_sens = c(18, 25)),
+        vcov = "HC3"
+      )
+    ),
+    effect_early_unadj = map2(
+      .x = model_unadj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        variables = list(da_reported_or_assigned_sens = c(14, 18)),
+        vcov = "HC3"
+      )
+    ),
+    model_iptw_adj = map2(
+      .x = data, .y = weighted_data_trim,
+      ~ glm_weightit(
+        value ~ splines::ns(
+          da_reported_or_assigned_sens,
+          knots = quantile(da_reported_or_assigned_sens, probs = 0.50, na.rm = TRUE),
+          Boundary.knots = quantile(da_reported_or_assigned_sens, probs = c(0.05, 0.95), na.rm = TRUE)
+        ) +
+          gender_t1 + age_t1 + ethnicity_t1 +
+          urban_t1 + religiosity_t1 + disability_t1 +
+          parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+          parent_warmth_t1 + parent_overp_t1 +
+          parent_alc_t1 + parent_smok_t3 +
+          dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+          lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+          se_cms_t1 + bi_cms_t1 +
+          alc_t1 + smok_t1 + drug_bin_t1,
+        family = gaussian,
+        data = .x,
+        weightit = .y
+      )
+    ),
+    effect_late_iptw_adj = map2(
+      .x = model_iptw_adj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = .y,
+        type = "response",
+        variables = list(da_reported_or_assigned_sens = c(18, 22)),
+        vcov = "HC3"
+      )
+    ),
+    effect_very_late_iptw_adj = map2(
+      .x = model_iptw_adj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = .y,
+        type = "response",
+        variables = list(da_reported_or_assigned_sens = c(18, 25)),
+        vcov = "HC3"
+      )
+    ),
+    effect_early_iptw_adj = map2(
+      .x = model_iptw_adj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = .y,
+        type = "response",
+        variables = list(da_reported_or_assigned_sens = c(14, 18)),
+        vcov = "HC3"
+      )
+    )
+  )
+
+effect_estimates_cont1_sens <- select(models_cont1_sens, starts_with("effect")) %>%
+  pivot_longer(cols = starts_with("effect_"),
+               names_to = "effect",
+               values_to = "contrasts") %>%
+  group_by(outcome, effect) %>%
+  nest() %>%
+  mutate(contrasts = map(.x = data, ~ summary(pool(.x$contrasts), conf.int = TRUE))) %>%
+  select(contrasts) %>%
+  unnest() %>%
+  select(outcome, effect, contrast, estimate, `2.5 %`, `97.5 %`) %>%
+  mutate(
+    across(c(estimate, `2.5 %`, `97.5 %`),
+           ~ ifelse(contrast == "18 - 14", .x * -1, .x)),
+    contrast = factor(case_when(
+      contrast == "18 - 14" ~ "Early (14y)",
+      contrast == "22 - 18" ~ "Late (22y)",
+      contrast == "25 - 18" ~ "Very late (25y)"
+    )),
+    estimation = case_when(
+      str_detect(effect, "unadj") ~ "unadjusted",
+      str_detect(effect, "iptw_adj") ~ "IPTW-adjusted"
+    )
+  )
+
+models_bin_sens <- sexual_debut_data_imp_sens %>%
+  pivot_longer(cols = c(si_bin_t5, drug_bin_t5, smok_t5),
+               names_to = "outcome",
+               values_to = "value") %>%
+  group_by(outcome, .imp) %>%
+  nest() %>%
+  left_join(., select(exposure_models_sens, weighted_data_trim), by = ".imp") %>%
+  mutate(
+    model_unadj = map(.x = data,
+                      ~ glm(value ~ splines::ns(da_reported_or_assigned_sens,
+                                                knots = quantile(da_reported_or_assigned_sens, probs = 0.50),
+                                                Boundary.knots = quantile(da_reported_or_assigned_sens, probs = c(0.05, 0.95))),
+                            family = "binomial", data = .x)),
+    effect_late_unadj = map2(.x = model_unadj, .y = data,
+                             ~ avg_comparisons(.x, type = "response",
+                                               variables = list(da_reported_or_assigned_sens = c(18, 22)),
+                                               vcov = "HC3")),
+    effect_very_late_unadj = map2(.x = model_unadj, .y = data,
+                                  ~ avg_comparisons(.x, type = "response",
+                                                    variables = list(da_reported_or_assigned_sens = c(18, 25)),
+                                                    vcov = "HC3")),
+    effect_early_unadj = map2(.x = model_unadj, .y = data,
+                              ~ avg_comparisons(.x, type = "response",
+                                                variables = list(da_reported_or_assigned_sens = c(14, 18)),
+                                                vcov = "HC3")),
+    model_iptw_adj = map2(.x = data, .y = weighted_data_trim,
+                          ~ glm_weightit(value ~  splines::ns(da_reported_or_assigned_sens,
+                                                               knots = quantile(da_reported_or_assigned_sens, probs = 0.50),
+                                                               Boundary.knots = quantile(da_reported_or_assigned_sens, probs = c(0.05, 0.95))) +
+                                           gender_t1 + age_t1 + ethnicity_t1 +
+                                           urban_t1 + religiosity_t1 + disability_t1 +
+                                           parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+                                           parent_warmth_t1 + parent_overp_t1 +
+                                           parent_alc_t1 + parent_smok_t3 +
+                                           dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+                                           lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+                                           se_cms_t1 + bi_cms_t1 +
+                                           alc_t1 + smok_t1 + drug_bin_t1,
+                                         family = binomial, data = .x, weightit = .y)),
+    effect_late_iptw_adj = map2(.x = model_iptw_adj, .y = data,
+                                ~ avg_comparisons(.x, newdata = .y, type = "response",
+                                                  variables = list(da_reported_or_assigned_sens = c(18, 22)),
+                                                  vcov = "HC3")),
+    effect_very_late_iptw_adj = map2(.x = model_iptw_adj, .y = data,
+                                     ~ avg_comparisons(.x, newdata = .y, type = "response",
+                                                       variables = list(da_reported_or_assigned_sens = c(18, 25)),
+                                                       vcov = "HC3")),
+    effect_early_iptw_adj = map2(.x = model_iptw_adj, .y = data,
+                                 ~ avg_comparisons(.x, newdata = .y, type = "response",
+                                                   variables = list(da_reported_or_assigned_sens = c(14, 18)),
+                                                   vcov = "HC3"))
+  )
+
+effect_estimates_bin_sens <- select(models_bin_sens, starts_with("effect")) %>%
+  pivot_longer(cols = starts_with("effect_"), names_to = "effect", values_to = "contrasts") %>%
+  group_by(outcome, effect) %>%
+  nest() %>%
+  mutate(contrasts = map(.x = data, ~ summary(pool(.x$contrasts), conf.int = TRUE))) %>%
+  select(contrasts) %>%
+  unnest() %>%
+  select(outcome, effect, contrast, estimate, `2.5 %`, `97.5 %`) %>%
+  mutate(
+    across(c(estimate, `2.5 %`, `97.5 %`),
+           ~ ifelse(contrast == "18 - 14", (.x * -1) * 100, .x * 100)),
+    contrast = factor(case_when(
+      contrast == "18 - 14" ~ "Early (14y)",
+      contrast == "22 - 18" ~ "Late (22y)",
+      contrast == "25 - 18" ~ "Very late (25y)"
+    )),
+    estimation = case_when(
+      str_detect(effect, "unadj") ~ "unadjusted",
+      str_detect(effect, "iptw_adj") ~ "IPTW-adjusted"
+    )
+  )
+
+effect_estimates_all_sens <- rbind(effect_estimates_cont1_sens, effect_estimates_bin_sens) %>%
+  mutate(
+    outcome = factor(case_when(
+      outcome == "dep_cms_t5" ~ "Depressive symptoms",
+      outcome == "anx_cms_t5" ~ "Anxiety symptoms",
+      outcome == "si_bin_t5" ~ "Suicidal ideation",
+      outcome == "lon_cms_t5" ~ "Loneliness",
+      outcome == "sa_cms_t5" ~ "Low social acceptance",
+      outcome == "ss_cms_t5" ~ "Low social support",
+      outcome == "se_cms_t5" ~ "Low self-esteem",
+      outcome == "bi_cms_t5" ~ "Body dissatisfaction",
+      outcome == "sd_cms_t5" ~ "Low sexual desire",
+      outcome == "alc_t5" ~ "Problematic alcohol use",
+      outcome == "drug_bin_t5" ~ "Illicit drug use",
+      outcome == "smok_t5" ~ "Smoking"
+    ),
+    levels = c("Problematic alcohol use", "Illicit drug use", "Smoking",
+               "Low sexual desire", "Body dissatisfaction", "Low self-esteem",
+               "Loneliness", "Low social acceptance", "Low social support",
+               "Depressive symptoms", "Anxiety symptoms", "Suicidal ideation"),
+    ordered = TRUE),
+    outcome_cat = factor(case_when(
+      outcome %in% c("Depressive symptoms", "Anxiety symptoms", "Suicidal ideation") ~ "mental",
+      outcome %in% c("Loneliness", "Low social acceptance", "Low social support") ~ "social",
+      outcome %in% c("Low self-esteem", "Body dissatisfaction", "Low sexual desire") ~ "wb",
+      outcome %in% c("Problematic alcohol use", "Illicit drug use", "Smoking") ~ "substance"
+    ),
+    levels = c("mental", "social", "wb", "substance"),
+    ordered = TRUE),
+    estimation = factor(
+      estimation,
+      levels = c("unadjusted", "IPTW-adjusted")
+    ),
+    tidy_estimate = paste0(
+      formatC(round(estimate, 2), format = "f", digits = 2), " (",
+      formatC(round(`2.5 %`, 2), format = "f", digits = 2), ", ",
+      formatC(round(`97.5 %`, 2), format = "f", digits = 2), ")"
+    )
+  ) %>%
+  ungroup()
+
+table_combined_effect_est_sens <- effect_estimates_all_sens %>%
+  filter(estimation == "IPTW-adjusted") %>%
+  select(outcome, contrast, tidy_estimate) %>%
+  pivot_wider(names_from = contrast, values_from = tidy_estimate) %>%
+  arrange(desc(outcome)) %>%
+  select(outcome, `Early (14y)`, `Late (22y)`, `Very late (25y)`)
