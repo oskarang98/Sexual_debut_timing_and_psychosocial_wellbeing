@@ -1,0 +1,568 @@
+######################################################################
+#### Timing of Sexual Debut and Long-Term Psychosocial Well-Being ####
+######################################################################
+
+###############################
+### 01. DATA PRE-PROCESSING ###
+###############################
+
+
+#### PACKAGES ####
+library(haven)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(psych)
+
+
+#### DATA INPUT ####
+# Read the SPSS file
+raw_data_path <- "N:/durable/Data_analyses/Libor/data/UiN_regfile_030124.sav"
+uin_data_raw <- read_sav(raw_data_path)
+
+#### SAMPLE RESTRICTION ####
+# Keep only participants who responded at T5
+yin_partici5_only <- uin_data_raw %>%
+  filter(partici5 == 1)
+
+#### PRIMARY EXPOSURE VARIABLE CREATION ####
+##### Deriving sexual debut age #####
+# Apply wave-specific plausibility ranges and coalesce in the predefined priority order
+
+yin_partici5_only <- yin_partici5_only %>%
+  mutate(
+    sexual_debut_t2 = if_else(between(as.numeric(SexEx2_5), 1, 22), as.numeric(SexEx2_5), NA_real_),
+    sexual_debut_t3 = if_else(between(as.numeric(SexEx3_5), 1, 27), as.numeric(SexEx3_5), NA_real_),
+    sexual_debut_t4 = if_else(between(as.numeric(SexEx4_5), 1, 33), as.numeric(SexEx4_5), NA_real_),
+    sexual_debut_t5 = if_else(between(as.numeric(SexEx5_5), 1, 48), as.numeric(SexEx5_5), NA_real_),
+    sexual_debut_age = coalesce(sexual_debut_t2, sexual_debut_t3, sexual_debut_t4, sexual_debut_t5)
+  )
+
+##### QC: Response distribution on SexEx5_4 among individuals with missing debut age #####
+sexex5_4_summary_missing_debut <- yin_partici5_only %>%
+  filter(is.na(sexual_debut_age)) %>%
+  summarise(
+    answered_1 = sum(SexEx5_4 == 1, na.rm = TRUE),
+    answered_2 = sum(SexEx5_4 == 2, na.rm = TRUE),
+    missing_SexEx5_4 = sum(is.na(SexEx5_4)),
+    .groups = "drop"
+  )
+
+sexex5_4_summary_missing_debut
+
+##### Assigning debut age for individuals without reported debut who confirmed no debut at T5 #####
+# Birth year is retrieved in the fixed priority order and converted to age in 2020
+
+yin_partici5_only <- yin_partici5_only %>%
+  mutate(
+    birth_year_t5 = as.numeric(Birth5_3),
+    birth_year_t4 = as.numeric(Birth4_3),
+    birth_year_t3 = as.numeric(Birth3_3),
+    assigned_debut_age = case_when(
+      !is.na(birth_year_t5) ~ 2020 - birth_year_t5, #birth year reported as four digits (YYYY)
+      is.na(birth_year_t5) & !is.na(birth_year_t4) ~ 120 - birth_year_t4, #birth year reported as two digits (YY)
+      is.na(birth_year_t5) & is.na(birth_year_t4) & !is.na(birth_year_t3) ~ 120 - birth_year_t3, #birth year reported as two digits (YY)
+      TRUE ~ NA_real_
+    )
+  )
+
+##### Table of individuals with missing debut age and no debut confirmed at T5 #####
+assigned_debut_table <- yin_partici5_only %>%
+  filter(is.na(sexual_debut_age), SexEx5_4 == 2) %>%
+  select(
+    id,
+    sexual_debut_age,
+    SexEx5_4,
+    Birth5_3,
+    Birth4_3,
+    Birth3_3,
+    assigned_debut_age
+  )
+
+assigned_debut_table
+
+##### Unified debut age variable reported or assigned #####
+dataset_da_rora <- yin_partici5_only %>%
+  mutate(
+    da_reported_or_assigned = case_when(
+      is.na(sexual_debut_age) & SexEx5_4 == 2 ~ assigned_debut_age,
+      TRUE ~ sexual_debut_age
+    )
+  )
+
+##### Remaining missing values in the unified exposure #####
+n_missing_da_reported_or_assigned <- dataset_da_rora %>%
+  summarise(n_missing = sum(is.na(da_reported_or_assigned)), .groups = "drop") %>%
+  pull(n_missing)
+
+n_missing_da_reported_or_assigned
+
+#### Exclude T1 debuters ####
+# T1 debuters and debut ages below 12 are excluded to ensure temporal ordering
+
+n_initial <- dataset_da_rora %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+t1_excluded <- dataset_da_rora %>%
+  filter(SexEx1_4 == 1)
+
+n_t1_excluded <- t1_excluded %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+after_t1 <- dataset_da_rora %>%
+  filter(SexEx1_4 != 1 | is.na(SexEx1_4))
+
+early_debut_excluded <- after_t1 %>%
+  filter(!is.na(da_reported_or_assigned), da_reported_or_assigned < 12)
+
+n_early_excluded <- early_debut_excluded %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+darora_no_t1 <- after_t1 %>%
+  filter(da_reported_or_assigned >= 12 | is.na(da_reported_or_assigned))
+
+n_final <- darora_no_t1 %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n)
+
+exclusion_counts <- tibble(
+  n_initial = n_initial,
+  n_t1_excluded = n_t1_excluded,
+  n_early_excluded = n_early_excluded,
+  n_final = n_final,
+  n_excluded_total = n_initial - n_final
+)
+
+exclusion_counts
+
+#### BASELINE COVARIATES #### 
+##### Sociodemographic covariates #####
+
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    age_birth = 92 - Birth9_3,
+    age_t1 = if_else(is.na(Age1_1), Age2_1 - 2, Age1_1),
+    age_t1 = if_else(is.na(age_t1), age_birth, age_t1),
+    age_t1 = if_else(age_t1 > 25, Age2_1 - 2, age_t1),
+    gender_tmp = if_else(is.na(Gende1_1), gende, Gende1_1),
+    gender_t1 = factor(
+      case_when(
+        gender_tmp == 1 ~ "women",
+        gender_tmp == 0 ~ "men",
+        TRUE ~ NA_character_
+      ),
+      levels = c("women", "men")
+    ),
+    ethnicity_t1 = case_when(
+      Origi1p1 == 1 | Origi1p2 == 1 ~ 0,
+      Origi1p1 == 2 & Origi1p2 == 2 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    urban_t1 = case_when(
+      Urban1_1 %in% c(1, 2) ~ 0,
+      Urban1_1 %in% c(3, 4) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    religiosity_t1 = case_when(
+      Relig1_1 %in% c(1, 2, 5) ~ 1,
+      Relig1_1 %in% c(3, 4) ~ 0,
+      TRUE ~ NA_real_
+    ),
+    disability_t1 = case_when(
+      Disa1_02 == 1 | Disa1_01 == 1 | Disa1_05 == 1 ~ 1,
+      is.na(Disa1_02) & is.na(Disa1_01) & is.na(Disa1_05) ~ NA_real_,
+      TRUE ~ 0
+    )
+  ) %>%
+  select(-gender_tmp)
+
+##### Family environment covariates #####
+
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    education_reg = case_when(
+      SOSBAK %in% c(4, 3) ~ "college/university",
+      SOSBAK %in% c(2, 1) ~ "lower",
+      SOSBAK == 9 ~ NA_character_,
+      TRUE ~ NA_character_
+    ),
+    education_sr = case_when(
+      ParEd1_7 %in% c(1, 2, 3) | ParEd1_6 %in% c(1, 2, 3) ~ "college/university",
+      ParEd1_3 %in% c(1, 2, 3) | ParEd1_4 %in% c(1, 2, 3) |
+        ParEd1_5 %in% c(1, 2, 3) | ParEd1_1 %in% c(1, 2, 3) |
+        ParEd1_2 %in% c(1, 2, 3) ~ "lower",
+      TRUE ~ NA_character_
+    ),
+    parent_ed_t1 = if_else(is.na(education_reg), education_sr, education_reg),
+    parent_ed_t1 = case_when(
+      parent_ed_t1 == "college/university" ~ 1,
+      parent_ed_t1 == "lower" ~ 0,
+      TRUE ~ NA_real_
+    ),
+    parent_emp_t1 = case_when(
+      (ParJo1_1 %in% c(3, 4, 5)) & (ParJo1_2 %in% c(3, 4, 5)) ~ 0,
+      is.na(ParJo1_1) & is.na(ParJo1_2) ~ NA_real_,
+      TRUE ~ 1
+    ),
+    living_sit_t1 = case_when(
+      House1_1 == 1 ~ 1,
+      is.na(House1_1) ~ NA_real_,
+      TRUE ~ 0
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    parent_warmth_t1 = mean(c_across(PBI1_06:PBI1_10), na.rm = TRUE),
+    parent_overp_t1 = mean(c_across(PBI1_01:PBI1_05), na.rm = TRUE),
+    parent_alc_t1 = mean(c_across(c(Subst1p1, Subst1p2)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parent_smok_t3 = case_when(
+      Smok3_02 == 4 | Smok3_03 == 4 ~ 1,
+      is.na(Smok3_02) & is.na(Smok3_03) ~ NA_real_,
+      TRUE ~ 0
+    )
+  ) %>%
+  select(-education_reg, -education_sr)
+
+##### Baseline psychosocial measures #####
+
+#Loneliness item reversal and composite
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    UCLA1_1_r = if_else(!is.na(UCLA1_1), 5 - UCLA1_1, NA_real_),
+    UCLA1_2_r = if_else(!is.na(UCLA1_2), 5 - UCLA1_2, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    lon_t1_rev = mean(c_across(c(UCLA1_1_r, UCLA1_2_r, UCLA1_3, UCLA1_4)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(lon_t1_rev = na_if(lon_t1_rev, NaN))
+
+# Baseline composites and binaries
+# Helper: mean score from item set with NaN set to missing
+score_mean_from_items <- function(df, items) {
+  df %>%
+    select(all_of(items)) %>%
+    rowwise() %>%
+    mutate(score = mean(c_across(everything()), na.rm = TRUE)) %>%
+    ungroup() %>%
+    transmute(score = na_if(score, NaN)) %>%
+    pull(score)
+}
+
+# Depression and anxiety at T1 
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    dep_cms_t1 = score_mean_from_items(darora_no_t1, str_c("SCL1_", str_pad(7:12, width = 2, pad = "0"))),
+    anx_cms_t1 = score_mean_from_items(darora_no_t1, str_c("SCL1_", str_pad(1:6, width = 2, pad = "0"))),
+    si_bin_t1 = case_when(
+      SCL1_13 == 1 ~ 0,
+      SCL1_13 %in% c(2, 3, 4) ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Low social acceptance (T1): reverse items 2, 4, 5 before CMS
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    SPPA1sa2_r = if_else(!is.na(SPPA1sa2), 5 - SPPA1sa2, NA_real_),
+    SPPA1sa4_r = if_else(!is.na(SPPA1sa4), 5 - SPPA1sa4, NA_real_),
+    SPPA1sa5_r = if_else(!is.na(SPPA1sa5), 5 - SPPA1sa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    sa_cms_t1 = mean(c_across(c(SPPA1sa1, SPPA1sa2_r, SPPA1sa3, SPPA1sa4_r, SPPA1sa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(sa_cms_t1 = na_if(sa_cms_t1, NaN))
+
+# Low self-esteem (T1): reverse items 3, 4, 5 before CMS
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    SPPA1sw3_r = if_else(!is.na(SPPA1sw3), 5 - SPPA1sw3, NA_real_),
+    SPPA1sw4_r = if_else(!is.na(SPPA1sw4), 5 - SPPA1sw4, NA_real_),
+    SPPA1sw5_r = if_else(!is.na(SPPA1sw5), 5 - SPPA1sw5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    se_cms_t1 = mean(c_across(c(SPPA1sw1, SPPA1sw2, SPPA1sw3_r, SPPA1sw4_r, SPPA1sw5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(se_cms_t1 = na_if(se_cms_t1, NaN))
+
+# Body dissatisfaction (T1): reverse items 4, 5 before CMS
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    SPPA1pa4_r = if_else(!is.na(SPPA1pa4), 5 - SPPA1pa4, NA_real_),
+    SPPA1pa5_r = if_else(!is.na(SPPA1pa5), 5 - SPPA1pa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    bi_cms_t1 = mean(c_across(c(SPPA1pa1, SPPA1pa2, SPPA1pa3, SPPA1pa4_r, SPPA1pa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(bi_cms_t1 = na_if(bi_cms_t1, NaN))
+
+# Low social support (T1): binary high/low support based on three "would not go to anyone" items
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    ss_sum_t1 = case_when(
+      is.na(SS1b01) & is.na(SS1c01) & is.na(SS1d01) ~ NA_real_,
+      TRUE ~ as.numeric(SS1b01) + as.numeric(SS1c01) + as.numeric(SS1d01)
+    ),
+    ss_cms_t1 = case_when(
+      ss_sum_t1 %in% c(0, 1) ~ 0,
+      ss_sum_t1 %in% c(2, 3) ~ 1,
+      TRUE ~ NA_real_
+    ),
+    alc_t1 = Subst1_1,
+    drug_bin_t1 = case_when(
+      Subst1_2 %in% c(2, 3, 4, 5, 6) | Subst1_4 %in% c(2, 3, 4, 5, 6) ~ 1,
+      Subst1_2 == 1 & Subst1_4 == 1 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    smok_t1 = case_when(
+      Smoke1_1 %in% c(4, 5) ~ 1,
+      Smoke1_1 %in% c(1, 2, 3) ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(-ss_sum_t1)
+
+
+#### DEPENDENT VARIABLES ####
+##### Item sets for T5 scoring #####
+
+items_dep_t5 <- str_c("SCL5_", str_pad(7:12, width = 2, pad = "0"))
+items_anx_t5 <- str_c("SCL5_", str_pad(1:6, width = 2, pad = "0"))
+item_si_t5 <- "SCL5_13"
+
+items_ss_t5_raw <- c("SSsat5_1", "SSsat5_3", "SSsat5_5")
+items_sd_t5 <- str_c("SexFa5_", 1:3)
+
+items_drug_t5 <- c("Subst5_2", "Subst5_6", "Subst5_7", "Subst5_4")
+item_alc_t5 <- "Subst5_1"
+item_smok_t5 <- "Smoke5_1"
+
+# Loneliness reversal and composite
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    UCLA5_1_r = 5 - UCLA5_1,
+    UCLA5_2_r = 5 - UCLA5_2
+  ) %>%
+  rowwise() %>%
+  mutate(
+    lon_cms_t5 = mean(c_across(c(UCLA5_1_r, UCLA5_2_r, UCLA5_3, UCLA5_4)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(lon_cms_t5 = na_if(lon_cms_t5, NaN))
+
+##### Continuous composites and binary outcomes #####
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    dep_cms_t5 = score_mean_from_items(darora_no_t1, items_dep_t5),
+    anx_cms_t5 = score_mean_from_items(darora_no_t1, items_anx_t5),
+    si_bin_t5 = case_when(
+      .data[[item_si_t5]] == 1 ~ 0,
+      .data[[item_si_t5]] %in% c(2, 3, 4) ~ 1,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Low social acceptance (T5): reverse items 2, 4, 5 before CMS
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    SPPA5sa2_r = if_else(!is.na(SPPA5sa2), 5 - SPPA5sa2, NA_real_),
+    SPPA5sa4_r = if_else(!is.na(SPPA5sa4), 5 - SPPA5sa4, NA_real_),
+    SPPA5sa5_r = if_else(!is.na(SPPA5sa5), 5 - SPPA5sa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    sa_cms_t5 = mean(c_across(c(SPPA5sa1, SPPA5sa2_r, SPPA5sa3, SPPA5sa4_r, SPPA5sa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(sa_cms_t5 = na_if(sa_cms_t5, NaN))
+
+# Low social support (T5): reverse composite so higher = worse (lower support)
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    ss_cms_t5 = score_mean_from_items(darora_no_t1, items_ss_t5_raw)
+  ) %>%
+  mutate(
+    ss_cms_t5 = if_else(is.na(ss_cms_t5), NA_real_, 5 - ss_cms_t5)
+  )
+
+# Low self-esteem (T5): reverse items 3, 4, 5 before CMS
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    SPPA5sw3_r = if_else(!is.na(SPPA5sw3), 5 - SPPA5sw3, NA_real_),
+    SPPA5sw4_r = if_else(!is.na(SPPA5sw4), 5 - SPPA5sw4, NA_real_),
+    SPPA5sw5_r = if_else(!is.na(SPPA5sw5), 5 - SPPA5sw5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    se_cms_t5 = mean(c_across(c(SPPA5sw1, SPPA5sw2, SPPA5sw3_r, SPPA5sw4_r, SPPA5sw5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(se_cms_t5 = na_if(se_cms_t5, NaN))
+
+# Body dissatisfaction (T5): reverse items 4, 5 before CMS
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    SPPA5pa4_r = if_else(!is.na(SPPA5pa4), 5 - SPPA5pa4, NA_real_),
+    SPPA5pa5_r = if_else(!is.na(SPPA5pa5), 5 - SPPA5pa5, NA_real_)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    bi_cms_t5 = mean(c_across(c(SPPA5pa1, SPPA5pa2, SPPA5pa3, SPPA5pa4_r, SPPA5pa5_r)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(bi_cms_t5 = na_if(bi_cms_t5, NaN))
+
+# Low sexual desire (T5) (REMOVED POST HOC. SEE P.3 IN THE SUPPLEMENTARY MATERIALS)
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    sd_cms_t5 = score_mean_from_items(darora_no_t1, items_sd_t5),
+    alc_t5 = .data[[item_alc_t5]]
+  )
+
+# Illicit drug use and smoking (T5)
+darora_no_t1 <- darora_no_t1 %>%
+  rowwise() %>%
+  mutate(
+    drug_non1_count = sum(c_across(all_of(items_drug_t5)) %in% c(2, 3, 4, 5, 6), na.rm = TRUE),
+    drug_all1 = sum(c_across(all_of(items_drug_t5)) == 1, na.rm = TRUE) == length(items_drug_t5),
+    drug_all_na = sum(is.na(c_across(all_of(items_drug_t5))), na.rm = TRUE) == length(items_drug_t5),
+    drug_bin_t5 = case_when(
+      drug_non1_count >= 1 ~ 1,
+      drug_all1 ~ 0,
+      drug_all_na ~ NA_real_,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    smok_t5 = case_when(
+      .data[[item_smok_t5]] %in% c(4, 5) ~ 1,
+      .data[[item_smok_t5]] %in% c(1, 2, 3) ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(-drug_non1_count, -drug_all1, -drug_all_na)
+
+#### SCALE RELIABILITY ####
+# McDonald's omega computed on complete cases
+
+omega_psych_complete <- function(df, items, scale_name) {
+
+  safe_omega <- purrr::possibly(
+    function(dat_complete) psych::omega(dat_complete, nfactors = 1, plot = FALSE)$omega.tot,
+    otherwise = NA_real_
+  )
+
+  dat <- df %>%
+    dplyr::select(dplyr::all_of(items)) %>%
+    tidyr::drop_na()
+
+  k <- ncol(dat)
+  N_used <- nrow(dat)
+
+  tibble::tibble(
+    scale = scale_name,
+    n_items = k,
+    N_used = N_used,
+    omega_mc = safe_omega(dat)
+  )
+}
+
+ucla_items_scored_t5 <- c("UCLA5_1_r", "UCLA5_2_r", "UCLA5_3", "UCLA5_4")
+items_sa_t5_scored <- c("SPPA5sa1", "SPPA5sa2_r", "SPPA5sa3", "SPPA5sa4_r", "SPPA5sa5_r")
+items_se_t5_scored <- c("SPPA5sw1", "SPPA5sw2", "SPPA5sw3_r", "SPPA5sw4_r", "SPPA5sw5_r")
+items_bi_t5_scored <- c("SPPA5pa1", "SPPA5pa2", "SPPA5pa3", "SPPA5pa4_r", "SPPA5pa5_r")
+
+omega_results_t5 <- dplyr::bind_rows(
+  omega_psych_complete(darora_no_t1, items_dep_t5, "Depressive symptoms (T5)"),
+  omega_psych_complete(darora_no_t1, items_anx_t5, "Anxiety symptoms (T5)"),
+  omega_psych_complete(darora_no_t1, ucla_items_scored_t5, "Loneliness (T5)"),
+  omega_psych_complete(darora_no_t1, items_sa_t5_scored, "Low social acceptance (T5)"),
+  omega_psych_complete(darora_no_t1, items_ss_t5_raw, "Low social support (T5)"),
+  omega_psych_complete(darora_no_t1, items_se_t5_scored, "Low self-esteem (T5)"),
+  omega_psych_complete(darora_no_t1, items_bi_t5_scored, "Body dissatisfaction (T5)"),
+  omega_psych_complete(darora_no_t1, items_sd_t5, "Low sexual desire (T5)")
+)
+
+omega_results_t5
+
+#### POMP SCALING ####
+# Rescaling of continuous outcomes (0 to 100) based on theoretical minimum and maximum
+
+pomp_specs <- tibble(
+  var = c(
+    "dep_cms_t5", "anx_cms_t5",
+    "lon_cms_t5", "sa_cms_t5", "ss_cms_t5",
+    "se_cms_t5", "bi_cms_t5",
+    "sd_cms_t5",
+    "alc_t5"
+  ),
+  min = c(1, 1, 1, 1, 1, 1, 1, 1, 1),
+  max = c(4, 4, 4, 4, 4, 4, 4, 6, 6)
+)
+
+# Apply a linear transformation that maps the theoretical minimum to 0 and maximum to 100
+pomp_transform <- function(x, min_val, max_val) {
+  (x - min_val) / (max_val - min_val) * 100
+}
+
+darora_no_t1 <- darora_no_t1 %>%
+  mutate(
+    across(
+      all_of(pomp_specs$var),
+      ~ pomp_transform(
+        .x,
+        min_val = pomp_specs %>% filter(var == cur_column()) %>% pull(min),
+        max_val = pomp_specs %>% filter(var == cur_column()) %>% pull(max)
+      )
+    )
+  )
+
+#### SELECT ANALYTICAL DATASET ####
+analysis_data <- darora_no_t1 %>%
+  select(
+    id,
+    da_reported_or_assigned,
+    gender_t1, age_t1, ethnicity_t1, urban_t1, religiosity_t1, disability_t1,
+    parent_ed_t1, parent_emp_t1, living_sit_t1,
+    parent_warmth_t1, parent_overp_t1, parent_alc_t1, parent_smok_t3,
+    dep_cms_t1, anx_cms_t1, si_bin_t1,
+    lon_t1_rev, sa_cms_t1, ss_cms_t1,
+    se_cms_t1, bi_cms_t1, alc_t1, smok_t1, drug_bin_t1,
+    dep_cms_t5, anx_cms_t5, si_bin_t5,
+    lon_cms_t5, sa_cms_t5, ss_cms_t5,
+    se_cms_t5, bi_cms_t5, sd_cms_t5,
+    alc_t5, drug_bin_t5, smok_t5
+  ) %>%
+  arrange(id)
+
+#### DESCRIPTIVE CHECK: EXPOSURE VARIABLE ####
+exposure_desc <- analysis_data %>%
+  dplyr::filter(!is.na(da_reported_or_assigned)) %>%
+  dplyr::summarise(
+    n        = dplyr::n(),
+    mean     = mean(da_reported_or_assigned),
+    median   = stats::median(da_reported_or_assigned),
+    mode     = as.numeric(
+      names(sort(table(da_reported_or_assigned), decreasing = TRUE))[1]
+    ),
+    min      = min(da_reported_or_assigned),
+    max      = max(da_reported_or_assigned),
+    range    = max - min
+  )
+
+exposure_desc
