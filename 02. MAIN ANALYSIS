@@ -1,0 +1,526 @@
+###########################
+#### 02. MAIN ANALYSIS ####
+###########################
+
+#### PACKAGES ####
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(mice)
+library(WeightIt)
+library(marginaleffects)
+library(cobalt)	   
+
+##############################
+#### MULTIPLE IMPUTATION #####
+##############################
+
+analysis_data <- analysis_data %>%
+  mutate(across(where(~ inherits(., "haven_labelled")), haven::zap_labels))
+
+# Dry run to extract default predictor matrix and default methods
+init_imp <- mice(analysis_data, maxit = 0)
+
+# Predictor matrix
+predictor_matrix <- init_imp$predictorMatrix
+predictor_matrix["id", ] <- 0
+predictor_matrix[, "id"] <- 0
+
+# Imputation methods
+imp_method <- init_imp$method
+
+# multiple imputation
+set.seed(12345)
+
+Imp1 <- mice(
+  analysis_data,
+  m = 10,          # Number of imputed datasets
+  maxit = 5,       # Number of iterations
+  method = imp_method,
+  predictorMatrix = predictor_matrix
+)
+
+# Convergence diagnostics
+plot(Imp1)
+
+sexual_debut_data_imp <- complete(Imp1, action = "long", include = FALSE)
+
+# defining the exposure (treatment assignment) models with all confounders
+covariates <- "gender_t1 + age_t1 + ethnicity_t1 +
+               urban_t1 + religiosity_t1 + disability_t1 +
+               parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+               parent_warmth_t1 + parent_overp_t1 +
+               parent_alc_t1 + parent_smok_t3 +
+               dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+               lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+               se_cms_t1 + bi_cms_t1 +
+               alc_t1 + smok_t1 + drug_bin_t1"
+
+###################################################
+#### EXPOSURE MODELS (for age at sexual debut) ####
+###################################################
+
+exposure_models <- sexual_debut_data_imp %>%
+  group_by(.imp) %>%
+  nest() %>%
+  mutate(
+    weighted_data = map(.x = data,
+                        ~ weightit(as.formula(paste0("da_reported_or_assigned ~ ", covariates)),
+                                   data = .x,
+                                   method = "cbps",   # covariate balancing propensity score (CBPS) weighting
+                                   stabilize = TRUE)),
+    balance_after = map(.x = weighted_data,
+                        ~ bal.tab(.x, thresholds = 0.10, poly = 2)),
+    non_balanced = map_dbl(.x = balance_after,
+                           ~ .x$Balanced.correlations["Not balanced, >0.1", "count"]),
+    ESS = map_dbl(.x = balance_after,
+                  ~ .x$Observations["Adjusted", ]),
+    weighted_data_trim = map(.x = weighted_data,
+                             ~ { w <- trim(.x, at = .99); trim(w, at = .01) }),  # trimming at 1st and 99th percentiles to control influence of extreme weights
+    balance_after_trim = map(.x = weighted_data_trim,
+                             ~ bal.tab(.x, thresholds = 0.10, poly = 2)),
+    non_balanced_trim = map_dbl(.x = balance_after_trim,
+                                ~ .x$Balanced.correlations["Not balanced, >0.1", "count"]),
+    ESS_trim = map_dbl(.x = balance_after_trim,
+                       ~ .x$Observations["Adjusted", ])
+  )
+
+max(exposure_models$non_balanced_trim)
+mean(exposure_models$ESS_trim)
+summary(exposure_models$weighted_data_trim[[3]]$weights) 
+
+# examining the covariate Balance (FIGURE 1)
+covariate_balance <- exposure_models %>%
+  mutate(
+    tab_bal = map(.x = weighted_data_trim,
+                  ~ bal.tab(.x, thresholds = 0.10, poly = 2)),
+        love_plot = map(.x = weighted_data_trim,
+                    ~ love.plot(.x,
+                                stats = "c",
+                                abs = TRUE,
+                                poly = 2))
+  )
+
+love_plot <- covariate_balance$love_plot[[1]]
+love_plot
+
+#################################################################
+#### OUTCOME MODELS (for psychosocial well-being in midlife) ####
+#################################################################
+
+models_cont1 <- sexual_debut_data_imp %>%
+  pivot_longer(
+    cols = c(
+      dep_cms_t5, anx_cms_t5,
+      lon_cms_t5, sa_cms_t5, ss_cms_t5,
+      se_cms_t5, bi_cms_t5, sd_cms_t5,
+      alc_t5
+    ),
+    names_to = "outcome",
+    values_to = "value"
+  ) %>%
+  group_by(outcome, .imp) %>%
+  nest() %>%
+  left_join(., select(exposure_models, weighted_data_trim), by = ".imp") %>%
+  mutate(
+    # Unadjusted models (no weights)
+    model_unadj = map(
+      .x = data,
+      ~ glm(
+        value ~ splines::ns(
+          da_reported_or_assigned,
+          knots = quantile(da_reported_or_assigned, probs = 0.50, na.rm = TRUE),
+          Boundary.knots = quantile(da_reported_or_assigned, probs = c(0.05, 0.95), na.rm = TRUE)
+        ),
+        family = gaussian,
+        data = .x
+      )
+    ),
+    effect_late_unadj = map2(
+      .x = model_unadj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        variables = list(da_reported_or_assigned = c(18, 22)),
+        vcov = "HC3"
+      )
+    ),
+    effect_very_late_unadj = map2(
+      .x = model_unadj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        variables = list(da_reported_or_assigned = c(18, 25)),
+        vcov = "HC3"
+      )
+    ),
+    effect_early_unadj = map2(
+      .x = model_unadj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        variables = list(da_reported_or_assigned = c(14, 18)),
+        vcov = "HC3"
+      )
+    ),
+
+    # IPTW outcome model
+    model_iptw_adj = map2(
+      .x = data, .y = weighted_data_trim,
+      ~ glm_weightit(
+        value ~ splines::ns(
+          da_reported_or_assigned,
+          knots = quantile(da_reported_or_assigned, probs = 0.50, na.rm = TRUE),
+          Boundary.knots = quantile(da_reported_or_assigned, probs = c(0.05, 0.95), na.rm = TRUE)
+        ) +
+          gender_t1 + age_t1 + ethnicity_t1 +
+          urban_t1 + religiosity_t1 + disability_t1 +
+          parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+          parent_warmth_t1 + parent_overp_t1 +
+          parent_alc_t1 + parent_smok_t3 +
+          dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+          lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+          se_cms_t1 + bi_cms_t1 +
+          alc_t1 + smok_t1 + drug_bin_t1,
+        family = gaussian,
+        data = .x,
+        weightit = .y
+      )
+    ),
+
+    # IPTW outcome model with gender moderation (gender x spline interaction) 
+    # Note: The gender moderation analysis was later moved to sensitivity due to data sparsity (positivity) concerns
+    model_iptw_adj_gx = map2(
+      .x = data, .y = weighted_data_trim,
+      ~ glm_weightit(
+        value ~ splines::ns(
+          da_reported_or_assigned,
+          knots = quantile(da_reported_or_assigned, probs = 0.50, na.rm = TRUE),
+          Boundary.knots = quantile(da_reported_or_assigned, probs = c(0.05, 0.95), na.rm = TRUE)
+        ) * gender_t1 +
+          age_t1 + ethnicity_t1 +
+          urban_t1 + religiosity_t1 + disability_t1 +
+          parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+          parent_warmth_t1 + parent_overp_t1 +
+          parent_alc_t1 + parent_smok_t3 +
+          dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+          lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+          se_cms_t1 + bi_cms_t1 +
+          alc_t1 + smok_t1 + drug_bin_t1,
+        family = gaussian,
+        data = .x,
+        weightit = .y
+      )
+    ),
+
+    effect_early_iptw_women = map2(
+  .x = model_iptw_adj_gx, .y = data,
+  ~ avg_comparisons(
+    .x,
+    newdata = dplyr::filter(.y, gender_t1 == "women"),
+    type = "response",
+    variables = list(da_reported_or_assigned = c(14, 18)),
+    vcov = "HC3"
+  )
+),
+effect_late_iptw_women = map2(
+  .x = model_iptw_adj_gx, .y = data,
+  ~ avg_comparisons(
+    .x,
+    newdata = dplyr::filter(.y, gender_t1 == "women"),
+    type = "response",
+    variables = list(da_reported_or_assigned = c(18, 22)),
+    vcov = "HC3"
+  )
+),
+effect_early_iptw_men = map2(
+  .x = model_iptw_adj_gx, .y = data,
+  ~ avg_comparisons(
+    .x,
+    newdata = dplyr::filter(.y, gender_t1 == "men"),
+    type = "response",
+    variables = list(da_reported_or_assigned = c(14, 18)),
+    vcov = "HC3"
+  )
+),
+effect_late_iptw_men = map2(
+  .x = model_iptw_adj_gx, .y = data,
+  ~ avg_comparisons(
+    .x,
+    newdata = dplyr::filter(.y, gender_t1 == "men"),
+    type = "response",
+    variables = list(da_reported_or_assigned = c(18, 22)),
+    vcov = "HC3"
+  )
+),
+
+    # IPTW ATE contrasts
+    effect_late_iptw_adj = map2(
+      .x = model_iptw_adj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = .y,
+        type = "response",
+        variables = list(da_reported_or_assigned = c(18, 22)),
+        vcov = "HC3"
+        )
+    ),
+    effect_very_late_iptw_adj = map2(
+      .x = model_iptw_adj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = .y,
+        type = "response",
+        variables = list(da_reported_or_assigned = c(18, 25)),
+        vcov = "HC3"
+      )
+    ),
+    effect_early_iptw_adj = map2(
+      .x = model_iptw_adj, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = .y,
+        type = "response",
+        variables = list(da_reported_or_assigned = c(14, 18)),
+        vcov = "HC3"
+      )
+    )
+  )
+
+effect_estimates_cont1 <- select(models_cont1, starts_with("effect")) %>%
+  pivot_longer(cols = starts_with("effect_"),
+               names_to = "effect",
+               values_to = "contrasts") %>%
+  group_by(outcome, effect) %>%
+  nest() %>%
+  mutate(contrasts = map(.x = data, ~ summary(pool(.x$contrasts), conf.int = TRUE))) %>%
+  select(contrasts) %>%
+  unnest() %>%
+  select(outcome, effect, contrast, estimate, `2.5 %`, `97.5 %`) %>%
+  mutate(
+    across(c(estimate, `2.5 %`, `97.5 %`),
+           ~ ifelse(contrast == "18 - 14", .x * -1, .x)),
+    contrast = factor(case_when(
+      contrast == "18 - 14" ~ "Early (14y)",
+      contrast == "22 - 18" ~ "Late (22y)",
+      contrast == "25 - 18" ~ "Very late (25y)"
+    )),
+    estimation = case_when(
+      str_detect(effect, "unadj") ~ "unadjusted",
+      str_detect(effect, "iptw_adj") ~ "IPTW-adjusted",
+      str_detect(effect, "iptw_women") ~ "IPTW-adjusted (Women)",
+      str_detect(effect, "iptw_men") ~ "IPTW-adjusted (Men)"
+    )
+  )
+
+models_bin <- sexual_debut_data_imp %>%
+  pivot_longer(cols = c(si_bin_t5, drug_bin_t5, smok_t5),
+               names_to = "outcome",
+               values_to = "value") %>%
+  group_by(outcome, .imp) %>%
+  nest() %>%
+  left_join(., select(exposure_models, weighted_data_trim), by = ".imp") %>%
+  mutate(
+    model_unadj = map(.x = data,
+                      ~ glm(value ~ splines::ns(da_reported_or_assigned,
+                                       knots = quantile(da_reported_or_assigned, probs = 0.50),
+                                       Boundary.knots = quantile(da_reported_or_assigned, probs = c(0.05, 0.95))),
+                            family = "binomial", data = .x)),
+    effect_late_unadj = map2(.x = model_unadj, .y = data,
+                             ~ avg_comparisons(.x, type = "response",
+                                               variables = list(da_reported_or_assigned = c(18, 22)),
+                                               vcov = "HC3")),
+    effect_very_late_unadj = map2(.x = model_unadj, .y = data,
+                                  ~ avg_comparisons(.x, type = "response",
+                                                    variables = list(da_reported_or_assigned = c(18, 25)),
+                                                    vcov = "HC3")),
+    effect_early_unadj = map2(.x = model_unadj, .y = data,
+                              ~ avg_comparisons(.x, type = "response",
+                                                variables = list(da_reported_or_assigned = c(14, 18)),
+                                                vcov = "HC3")),
+    model_iptw_adj = map2(.x = data, .y = weighted_data_trim,
+                          ~ glm_weightit(value ~  splines::ns(da_reported_or_assigned,
+                                                    knots = quantile(da_reported_or_assigned, probs = 0.50),
+                                                    Boundary.knots = quantile(da_reported_or_assigned, probs = c(0.05, 0.95))) +
+                                           gender_t1 + age_t1 + ethnicity_t1 +
+                                           urban_t1 + religiosity_t1 + disability_t1 +
+                                           parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+                                           parent_warmth_t1 + parent_overp_t1 +
+                                           parent_alc_t1 + parent_smok_t3 +
+                                           dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+                                           lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+                                           se_cms_t1 + bi_cms_t1 +
+                                           alc_t1 + smok_t1 + drug_bin_t1,
+                                         family = binomial, data = .x, weightit = .y)),
+
+    # IPTW outcome model with gender moderation (gender x spline interaction)
+    model_iptw_adj_gx = map2(
+      .x = data, .y = weighted_data_trim,
+      ~ glm_weightit(
+        value ~ splines::ns(
+          da_reported_or_assigned,
+          knots = quantile(da_reported_or_assigned, probs = 0.50, na.rm = TRUE),
+          Boundary.knots = quantile(da_reported_or_assigned, probs = c(0.05, 0.95), na.rm = TRUE)
+        ) * gender_t1 +
+          age_t1 + ethnicity_t1 +
+          urban_t1 + religiosity_t1 + disability_t1 +
+          parent_ed_t1 + parent_emp_t1 + living_sit_t1 +
+          parent_warmth_t1 + parent_overp_t1 +
+          parent_alc_t1 + parent_smok_t3 +
+          dep_cms_t1 + anx_cms_t1 + si_bin_t1 +
+          lon_t1_rev + sa_cms_t1 + ss_cms_t1 +
+          se_cms_t1 + bi_cms_t1 +
+          alc_t1 + smok_t1 + drug_bin_t1,
+        family = binomial,
+        data = .x,
+        weightit = .y
+      )
+    ),
+
+    effect_early_iptw_women = map2(
+      .x = model_iptw_adj_gx, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = dplyr::filter(.y, gender_t1 == "women"),
+        type = "response",
+        variables = list(da_reported_or_assigned = c(14, 18)),
+        vcov = "HC3"
+      )
+    ),
+    effect_late_iptw_women = map2(
+      .x = model_iptw_adj_gx, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = dplyr::filter(.y, gender_t1 == "women"),
+        type = "response",
+        variables = list(da_reported_or_assigned = c(18, 22)),
+        vcov = "HC3"
+      )
+    ),
+    effect_early_iptw_men = map2(
+      .x = model_iptw_adj_gx, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = dplyr::filter(.y, gender_t1 == "men"),
+        type = "response",
+        variables = list(da_reported_or_assigned = c(14, 18)),
+        vcov = "HC3"
+      )
+    ),
+    effect_late_iptw_men = map2(
+      .x = model_iptw_adj_gx, .y = data,
+      ~ avg_comparisons(
+        .x,
+        newdata = dplyr::filter(.y, gender_t1 == "men"),
+        type = "response",
+        variables = list(da_reported_or_assigned = c(18, 22)),
+        vcov = "HC3"
+      )
+    ),
+
+    effect_late_iptw_adj = map2(.x = model_iptw_adj, .y = data,
+                                ~ avg_comparisons(.x, newdata = .y, type = "response",
+                                                  variables = list(da_reported_or_assigned = c(18, 22)),
+                                                  vcov = "HC3"
+                                                )),
+    effect_very_late_iptw_adj = map2(.x = model_iptw_adj, .y = data,
+                                     ~ avg_comparisons(.x, newdata = .y, type = "response",
+                                                       variables = list(da_reported_or_assigned = c(18, 25)),
+                                                       vcov = "HC3"
+                                                       )),
+    effect_early_iptw_adj = map2(.x = model_iptw_adj, .y = data,
+                                 ~ avg_comparisons(.x, newdata = .y, type = "response",
+                                                   variables = list(da_reported_or_assigned = c(14, 18)),
+                                                   vcov = "HC3"
+                                                   ))
+  )
+
+effect_estimates_bin <- select(models_bin, starts_with("effect")) %>%
+  pivot_longer(cols = starts_with("effect_"), names_to = "effect", values_to = "contrasts") %>%
+  group_by(outcome, effect) %>%
+  nest() %>%
+  mutate(contrasts = map(.x = data, ~ summary(pool(.x$contrasts), conf.int = TRUE))) %>%
+  select(contrasts) %>%
+  unnest() %>%
+  select(outcome, effect, contrast, estimate, `2.5 %`, `97.5 %`) %>%
+  mutate(
+    across(c(estimate, `2.5 %`, `97.5 %`),
+           ~ ifelse(contrast == "18 - 14", (.x * -1) * 100, .x * 100)),
+    contrast = factor(case_when(
+      contrast == "18 - 14" ~ "Early (14y)",
+      contrast == "22 - 18" ~ "Late (22y)",
+      contrast == "25 - 18" ~ "Very late (25y)"
+    )),
+    estimation = case_when(
+      str_detect(effect, "unadj") ~ "unadjusted",
+      str_detect(effect, "iptw_adj") ~ "IPTW-adjusted",
+      str_detect(effect, "iptw_women") ~ "IPTW-adjusted (Women)",
+      str_detect(effect, "iptw_men") ~ "IPTW-adjusted (Men)"
+    )
+  )
+
+effect_estimates_all <- rbind(effect_estimates_cont1, effect_estimates_bin) %>%
+  mutate(
+    outcome = factor(case_when(
+      outcome == "dep_cms_t5" ~ "Depressive symptoms",
+      outcome == "anx_cms_t5" ~ "Anxiety symptoms",
+      outcome == "si_bin_t5" ~ "Suicidal ideation",
+      outcome == "lon_cms_t5" ~ "Loneliness",
+      outcome == "sa_cms_t5" ~ "Low social acceptance",
+      outcome == "ss_cms_t5" ~ "Low social support",
+      outcome == "se_cms_t5" ~ "Low self-esteem",
+      outcome == "bi_cms_t5" ~ "Body dissatisfaction",
+      outcome == "sd_cms_t5" ~ "Low sexual desire", #REMOVED POST HOC (SEE THE SUPPLEMENTARY MATERIALS P.3)
+      outcome == "alc_t5" ~ "Problematic alcohol use",
+      outcome == "drug_bin_t5" ~ "Illicit drug use",
+      outcome == "smok_t5" ~ "Smoking"
+    ),
+    levels = c("Problematic alcohol use", "Illicit drug use", "Smoking",
+               "Low sexual desire", "Body dissatisfaction", "Low self-esteem",
+               "Loneliness", "Low social acceptance", "Low social support",
+               "Depressive symptoms", "Anxiety symptoms", "Suicidal ideation"),
+    ordered = TRUE),
+    outcome_cat = factor(case_when(
+      outcome %in% c("Depressive symptoms", "Anxiety symptoms", "Suicidal ideation") ~ "mental",
+      outcome %in% c("Loneliness", "Low social acceptance", "Low social support") ~ "social",
+      outcome %in% c("Low self-esteem", "Body dissatisfaction", "Low sexual desire") ~ "wb",
+      outcome %in% c("Problematic alcohol use", "Illicit drug use", "Smoking") ~ "substance"
+    ),
+    levels = c("mental", "social", "wb", "substance"),
+    ordered = TRUE),
+    estimation = factor(
+    estimation,
+    levels = c("unadjusted", "IPTW-adjusted", "IPTW-adjusted (Women)", "IPTW-adjusted (Men)")
+    ),
+    tidy_estimate = paste0(
+      formatC(round(estimate, 2), format = "f", digits = 2), " (",
+      formatC(round(`2.5 %`, 2), format = "f", digits = 2), ", ",
+      formatC(round(`97.5 %`, 2), format = "f", digits = 2), ")"
+    )
+  ) %>%
+  ungroup()
+
+# table output
+table_combined_effect_est <- effect_estimates_all %>%
+  filter(estimation == "IPTW-adjusted") %>%
+  select(outcome, contrast, tidy_estimate) %>%
+  pivot_wider(names_from = contrast, values_from = tidy_estimate) %>%
+  arrange(desc(outcome)) %>%
+  select(outcome, `Early (14y)`, `Late (22y)`, `Very late (25y)`)
+
+table_gender_moderation <- effect_estimates_all %>%
+  filter(
+    estimation %in% c("IPTW-adjusted (Women)", "IPTW-adjusted (Men)"),
+    contrast %in% c("Early (14y)", "Late (22y)")
+  ) %>%
+  mutate(
+    estimation = dplyr::recode(
+      estimation,
+      "IPTW-adjusted (Women)" = "Women",
+      "IPTW-adjusted (Men)" = "Men"
+    ),
+    colname = paste0(estimation, ": ", contrast)
+  ) %>%
+  select(outcome, colname, tidy_estimate) %>%
+  tidyr::pivot_wider(names_from = colname, values_from = tidy_estimate) %>%
+  arrange(desc(outcome))
+
+
